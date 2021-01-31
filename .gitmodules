@@ -1,6 +1,6 @@
 [submodule "transformers"]
 	path = transformers
-	url = git@github.com:huggingface/transformers.git
+	url = https://github.com/huggingface/transformers.git
 [submodule "coco_caption"]
 	path = coco_caption
-	url = git@github.com:LuoweiZhou/coco-caption.git
+	url = https://github.com/LuoweiZhou/coco-caption.git

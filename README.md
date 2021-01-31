@@ -1,7 +1,8 @@
 # Oscar: Object-Semantics Aligned Pre-training for Vision-and-Language Tasks    <img src="docs/oscar_logo.png" width="200" align="right"> 
 ## Updates
-05/28/2020: Released finetuned models on downstream tasks, please check [MODEL_ZOO.md](MODEL_ZOO.md).
-05/15/2020: Released pretrained models, datasets, and code for downstream tasks finetuning.
+05/28/2020: Released finetuned models on downstream tasks, please check [MODEL_ZOO.md](MODEL_ZOO.md). <br/>
+05/15/2020: Released pretrained models, datasets, and code for downstream tasks finetuning. <br/>
+01/13/2021: our new work [VinVL](https://arxiv.org/abs/2101.00529) proposed OSCAR+, an improved version of OSCAR, and provided a better object-attribute detection model to extract features for V+L tasks. The VinVL work achieved SOTA performance on all seven V+L tasks here. Please stay tuned for the model and code release. 
 
 ## Introduction
 This repository contains source code necessary to reproduce the results presented in the paper [Oscar: Object-Semantics Aligned Pre-training for Vision-Language Tasks](https://arxiv.org/abs/2004.06165).
@@ -42,6 +43,13 @@ Please consider citing this paper if you use the code:
   author={Li, Xiujun and Yin, Xi and Li, Chunyuan and Hu, Xiaowei and Zhang, Pengchuan and Zhang, Lei and Wang, Lijuan and Hu, Houdong and Dong, Li and Wei, Furu and Choi, Yejin and Gao, Jianfeng},
   journal={arXiv preprint arXiv:2004.06165},
   year={2020}
+}
+
+@article{zhang2021vinvl,
+  title={VinVL: Making Visual Representations Matter in Vision-Language Models},
+  author={Zhang, Pengchuan and Li, Xiujun and Hu, Xiaowei and Yang, Jianwei and Zhang, Lei and Wang, Lijuan and Choi, Yejin and Gao, Jianfeng},
+  journal={arXiv preprint arXiv:2101.00529},
+  year={2021}
 }
 ```
 
