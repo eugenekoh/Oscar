@@ -133,6 +133,7 @@ examples/runs
 .idea/
 
 # local folders
-data
+datasets
 models
 output
+experiments
