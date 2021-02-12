@@ -607,7 +607,7 @@ def evaluate(args, val_dataset, model, tokenizer, output_dir):
 
 
 def test(args, test_dataset, model, tokenizer, predict_file):
-    args.test_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    args.test_batch_size = args.per_gpu_eval_batch_size * (args.n_gpu - 1)
     test_sampler = SequentialSampler(test_dataset)
     cache_file = predict_file
 
