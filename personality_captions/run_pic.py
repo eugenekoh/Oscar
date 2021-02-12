@@ -141,19 +141,18 @@ class CaptionTSVDataset(Dataset):
     def __getitem__(self, idx):
         img_idx = self.get_image_index(idx)
         img_key = self.image_keys[img_idx]
-
         features = self.get_image_features(img_idx)
-        od_labels = self.get_od_labels(img_idx)
         caption = self.get_caption(idx)
+        od_labels = self.get_od_labels(img_idx)
         personality = self.get_personality(idx)
-
-        example = self.tensorizer.tensorize_example(caption, features, od_labels, personality)
+        example = self.tensorizer.tensorize_example(caption, features, text_b=od_labels)
         return img_key, example
 
     def __len__(self):
         if self.is_train:
             return len(self.captions)
         return self.get_valid_tsv().num_rows()
+
 
 class CaptionTSVDatasetWithConstraints(CaptionTSVDataset):
     r"""
@@ -202,8 +201,8 @@ class CaptionTSVDatasetWithConstraints(CaptionTSVDataset):
 
 
 class CaptionTensorizer(object):
-    def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=75, 
-            max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3, max_seq_c_length = 5,
+    def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=70, 
+            max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3,
             is_train=True):
         """Constructor.
         Args:
@@ -222,47 +221,39 @@ class CaptionTensorizer(object):
         self.max_seq_a_len = max_seq_a_length
         self.mask_prob = mask_prob
         self.max_masked_tokens = max_masked_tokens
-        self.max_seq_c_len = max_seq_c_length
         self._triangle_mask = torch.tril(torch.ones((self.max_seq_len, 
             self.max_seq_len), dtype=torch.long))
 
-    def tensorize_example(self, text_a, img_feat, text_b, text_c,
+    def tensorize_example(self, text_a, img_feat, text_b=None,
             cls_token_segment_id=0, pad_token_segment_id=0,
-            sequence_a_segment_id=0, sequence_b_segment_id=1,
-            sequence_c_segment_id=1):
+            sequence_a_segment_id=0, sequence_b_segment_id=1):
         if self.is_train:
             tokens_a = self.tokenizer.tokenize(text_a)
         else:
             # fake tokens to generate masks
             tokens_a = [self.tokenizer.mask_token] * (self.max_seq_a_len - 2)
-        if len(tokens_a) > self.max_seq_a_len - 2: # 2 tokens - [CLS] and [SEP]
+        if len(tokens_a) > self.max_seq_a_len - 2:
             tokens_a = tokens_a[:(self.max_seq_a_len - 2)]
 
         tokens = [self.tokenizer.cls_token] + tokens_a + [self.tokenizer.sep_token]
-        segment_ids = [cls_token_segment_id] + [sequence_a_segment_id] * (len(tokens) - 1) # sep token use same id
+        segment_ids = [cls_token_segment_id] + [sequence_a_segment_id] * (len(tokens) - 1)
         seq_a_len = len(tokens)
+        if text_b:
+            # pad text_a to keep it in fixed length for better inference.
+            padding_a_len = self.max_seq_a_len - seq_a_len
+            tokens += [self.tokenizer.pad_token] * padding_a_len
+            segment_ids += ([pad_token_segment_id] * padding_a_len)
 
-        # pad text_a to keep it in fixed length for better inference.
-        padding_a_len = self.max_seq_a_len - seq_a_len
-        tokens += [self.tokenizer.pad_token] * padding_a_len
-        segment_ids += ([pad_token_segment_id] * padding_a_len)
-
-        # add personality captions
-        tokens_c = self.tokenizer.tokenize(text_c)
-        tokens_c = tokens_c[:(self.max_seq_c_len - 1)]
-        tokens += tokens_c + [self.tokenizer.sep_token]
-        segment_ids += [sequence_c_segment_id] * (len(tokens_c) + 1)
-
-        tokens_b = self.tokenizer.tokenize(text_b)
-        if len(tokens_b) > self.max_seq_len - len(tokens) - 1: # caption + labels + , 1 for sep token
-            tokens_b = tokens_b[: (self.max_seq_len - len(tokens) - 1)]
-        tokens += tokens_b + [self.tokenizer.sep_token]
-        segment_ids += [sequence_b_segment_id] * (len(tokens_b) + 1) # sep token use same id
+            tokens_b = self.tokenizer.tokenize(text_b)
+            if len(tokens_b) > self.max_seq_len - len(tokens) - 1:
+                tokens_b = tokens_b[: (self.max_seq_len - len(tokens) - 1)]
+            tokens += tokens_b + [self.tokenizer.sep_token]
+            segment_ids += [sequence_b_segment_id] * (len(tokens_b) + 1)
 
         seq_len = len(tokens)
         if self.is_train:
             masked_pos = torch.zeros(self.max_seq_len, dtype=torch.int)
-            # randomly mask words for prediction, ignore [CLS], masks [SEP] as well
+            # randomly mask words for prediction, ignore [CLS]
             candidate_masked_idx = list(range(1, seq_a_len)) # only mask text_a
             random.shuffle(candidate_masked_idx)
             num_masked = min(max(round(self.mask_prob * seq_a_len), 1), self.max_masked_tokens)
@@ -315,17 +306,16 @@ class CaptionTensorizer(object):
         # for caption as caption will have full attention on image. 
         max_len = self.max_seq_len + self.max_img_seq_len
         attention_mask = torch.zeros((max_len, max_len), dtype=torch.long)
-        # C: caption, L: label, R: image region, P: personality
+        # C: caption, L: label, R: image region
         c_start, c_end = 0, seq_a_len
         l_start, l_end = self.max_seq_a_len, seq_len
         r_start, r_end = self.max_seq_len, self.max_seq_len + img_len
         # triangle mask for caption to caption
         attention_mask[c_start : c_end, c_start : c_end].copy_(self._triangle_mask[0 : seq_a_len, 0 : seq_a_len])
-        # full attention for L-L, R-R, P-P
+        # full attention for L-L, R-R
         attention_mask[l_start : l_end, l_start : l_end] = 1
         attention_mask[r_start : r_end, r_start : r_end] = 1
-        # full attention for C-L, C-R, C-P
-        # TODO : why no L-C , R-C
+        # full attention for C-L, C-R
         attention_mask[c_start : c_end, l_start : l_end] = 1
         attention_mask[c_start : c_end, r_start : r_end] = 1
         # full attention for L-R:
@@ -751,7 +741,7 @@ def main():
                         help="Pretrained config name or path if not the same as model_name.")
     parser.add_argument("--tokenizer_name", default="", type=str, 
                         help="Pretrained tokenizer name or path if not the same as model_name.")
-    parser.add_argument("--max_seq_length", default=75, type=int,
+    parser.add_argument("--max_seq_length", default=70, type=int,
                         help="The maximum total input sequence length after tokenization. "
                              "Sequences longer than this will be truncated, "
                              "sequences shorter will be padded.")
