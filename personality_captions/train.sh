@@ -7,6 +7,7 @@ python personality_captions/run_pic.py \
 	--add_od_labels \
 	--learning_rate 0.00003 \
 	--per_gpu_train_batch_size 1 \
+	--per_gpu_eval_batch_size 1 \
 	--num_train_epochs 1 \
 	--save_steps 5000 \
 	--output_dir output \

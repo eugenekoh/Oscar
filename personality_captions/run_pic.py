@@ -21,9 +21,10 @@ from oscar.utils.caption_evaluate import (evaluate_on_coco_caption,
         evaluate_on_nocaps, ScstRewardCriterion)
 from oscar.utils.cbs import ConstraintFilter, ConstraintBoxesReader
 from oscar.utils.cbs import FiniteStateMachineBuilder
-from oscar.modeling.modeling_bert import BertForImageCaptioning
+from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
 from transformers.pytorch_transformers import BertTokenizer, BertConfig
 from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule, WarmupConstantSchedule
+from tensorboardX import SummaryWriter
 
 
 class CaptionTSVDataset(Dataset):
@@ -49,6 +50,7 @@ class CaptionTSVDataset(Dataset):
         self.label_file = find_file_path_in_yaml(self.cfg['label'], self.root)
         self.feat_file = find_file_path_in_yaml(self.cfg['feature'], self.root)
         self.caption_file = find_file_path_in_yaml(self.cfg.get('caption'), self.root)
+        self.personality_file = find_file_path_in_yaml(self.cfg.get('personality'), self.root)
 
         assert op.isfile(self.feat_file)
         if add_od_labels: assert op.isfile(self.label_file)
@@ -70,6 +72,7 @@ class CaptionTSVDataset(Dataset):
         self.image_keys = self.prepare_image_keys()
         self.key2index = self.prepare_image_key_to_index()
         self.key2captions = self.prepare_image_key_to_captions()
+        self.personality2index = self.prepare_personality_to_index()
 
     def get_valid_tsv(self):
         # based on the order of file size
@@ -77,6 +80,13 @@ class CaptionTSVDataset(Dataset):
             return self.label_tsv
         if self.feat_tsv:
             return self.feat_tsv
+
+    def prepare_personality_to_index(self):
+        with open(self.personality_file) as f:
+            personalities = list(x.strip() for x in f.readlines())
+            assert len(personalities) == 215
+        
+        return {x : i for i, x in enumerate(personalities)}
 
     def prepare_image_keys(self):
         tsv = self.get_valid_tsv()
@@ -118,10 +128,8 @@ class CaptionTSVDataset(Dataset):
         return ""
 
     def get_personality(self, idx):
-        if self.is_train:
-            img_cap_pair = self.captions[idx]
-            return img_cap_pair['personality']
-        return ""
+        img_cap_pair = self.captions[idx]
+        return self.personality2index[img_cap_pair['personality']]
 
     def get_od_labels(self, img_idx):
         od_labels = None
@@ -145,7 +153,7 @@ class CaptionTSVDataset(Dataset):
         caption = self.get_caption(idx)
         od_labels = self.get_od_labels(img_idx)
         personality = self.get_personality(idx)
-        example = self.tensorizer.tensorize_example(caption, features, text_b=od_labels)
+        example = self.tensorizer.tensorize_example(caption, features, text_b=od_labels, personality=personality)
         return img_key, example
 
     def __len__(self):
@@ -226,7 +234,8 @@ class CaptionTensorizer(object):
 
     def tensorize_example(self, text_a, img_feat, text_b=None,
             cls_token_segment_id=0, pad_token_segment_id=0,
-            sequence_a_segment_id=0, sequence_b_segment_id=1):
+            sequence_a_segment_id=0, sequence_b_segment_id=1,
+            personality=None):
         if self.is_train:
             tokens_a = self.tokenizer.tokenize(text_a)
         else:
@@ -324,11 +333,13 @@ class CaptionTensorizer(object):
 
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         segment_ids = torch.tensor(segment_ids, dtype=torch.long)
+        personality = torch.tensor(personality, dtype=torch.long)
 
+        # add personality index
         if self.is_train:
             masked_ids = torch.tensor(masked_ids, dtype=torch.long)
-            return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, masked_ids)
-        return (input_ids, attention_mask, segment_ids, img_feat, masked_pos)
+            return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, masked_ids, personality)
+        return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, personality)
 
 
 def build_dataset(yaml_file, tokenizer, args, is_train=True):
@@ -379,6 +390,7 @@ def compute_score_with_logits(logits, labels):
 
 def train(args, train_dataset, val_dataset, model, tokenizer):
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    writer = SummaryWriter()
     train_sampler = RandomSampler(train_dataset) 
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, 
             batch_size=args.train_batch_size, num_workers=args.num_workers)
@@ -437,7 +449,8 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 model.train()
                 inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
                     'token_type_ids': batch[2], 'img_feats': batch[3], 
-                    'masked_pos': batch[4], 'masked_ids': batch[5]
+                    'masked_pos': batch[4], 'masked_ids': batch[5], 
+                    'personality_ids' : batch[6],
                 }
                 outputs = model(**inputs)
                 loss, logits = outputs[:2]
@@ -468,6 +481,10 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                         optimizer.param_groups[0]["lr"], loss, global_loss / global_step, 
                         batch_acc, global_acc / global_step)
                     )
+                    writer.add_scalar("Loss/Loss", loss, global_step)
+                    writer.add_scalar("Loss/Global_Loss", global_loss, global_step)
+                    writer.add_scalar("Score/Score", batch_acc, global_step)
+                    writer.add_scalar("Score/Global_Score", global_acc / global_step, global_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
@@ -486,6 +503,16 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                         eval_log.append(res)
                         with open(args.output_dir + '/eval_logs.json', 'w') as f:
                             json.dump(eval_log, f)
+
+                        writer.add_scalar("Evaluation/Bleu_1", res['Bleu_1'], global_step)
+                        writer.add_scalar("Evaluation/Bleu_2", res['Bleu_2'], global_step)
+                        writer.add_scalar("Evaluation/Bleu_3", res['Bleu_3'], global_step)
+                        writer.add_scalar("Evaluation/Bleu_4", res['Bleu_4'], global_step)
+                        writer.add_scalar("Evaluation/METEOR", res['METEOR'], global_step)
+                        writer.add_scalar("Evaluation/ROUGE_L", res['ROUGE_L'], global_step)
+                        writer.add_scalar("Evaluation/CIDEr", res['CIDEr'], global_step)
+                        writer.add_scalar("Evaluation/SPICE", res['SPICE'], global_step)
+
     return global_step, global_loss / global_step
 
 
@@ -607,7 +634,7 @@ def evaluate(args, val_dataset, model, tokenizer, output_dir):
 
 
 def test(args, test_dataset, model, tokenizer, predict_file):
-    args.test_batch_size = args.per_gpu_eval_batch_size * (args.n_gpu - 1)
+    args.test_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     test_sampler = SequentialSampler(test_dataset)
     cache_file = predict_file
 
@@ -648,6 +675,7 @@ def test(args, test_dataset, model, tokenizer, predict_file):
                     'input_ids': batch[0], 'attention_mask': batch[1],
                     'token_type_ids': batch[2], 'img_feats': batch[3],
                     'masked_pos': batch[4],
+                    'personality_ids' : batch[5],
                     'do_sample': False,
                     'bos_token_id': cls_token_id,
                     'pad_token_id': pad_token_id,
@@ -836,7 +864,7 @@ def main():
     set_seed(args.seed, args.n_gpu)
 
     # Load pretrained model and tokenizer
-    config_class, model_class, tokenizer_class = BertConfig, BertForImageCaptioning, BertTokenizer
+    config_class, model_class, tokenizer_class = BertConfig, BertForPersonalityImageCaptioning , BertTokenizer
     if args.do_train:
         assert args.model_name_or_path is not None
         config = config_class.from_pretrained(args.config_name if args.config_name else \

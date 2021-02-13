@@ -416,13 +416,12 @@ class ImageBertForMultipleChoice(BertPreTrainedModel):
             outputs = (loss,) + outputs
         return outputs
 
-
-class BertForImageCaptioning(CaptionPreTrainedModel):
+class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
     """
     Bert for Image Captioning.
     """
-    def __init__(self, config):
-        super(BertForImageCaptioning, self).__init__(config)
+    def __init__(self, config, num_personalities=215):
+        super(BertForPersonalityImageCaptioning, self).__init__(config)
         self.config = config
         self.bert = BertImgModel(config)
         self.transform = BertPredictionHeadTransform(config)
@@ -432,6 +431,9 @@ class BertForImageCaptioning(CaptionPreTrainedModel):
         self.loss = nn.CrossEntropyLoss(reduction='mean')
         self.drop_worst_ratio = 0.2
 
+        self.personality_dense = nn.Linear(bert_embedding_weight.size(1) * 2, bert_embedding_weight.size(1))
+        self.personality_embedding = nn.Embedding(num_personalities, bert_embedding_weight.size(1))
+
     def forward(self, *args, **kwargs):
         is_decode = kwargs.get('is_decode', False)
         if is_decode:
@@ -439,25 +441,36 @@ class BertForImageCaptioning(CaptionPreTrainedModel):
         else:
             return self.encode_forward(*args, **kwargs)
 
-    def encode_forward(self, input_ids, img_feats, attention_mask, masked_pos, masked_ids=None, 
+    def encode_forward(self, personality_ids, input_ids, img_feats, attention_mask, masked_pos, masked_ids=None, 
             token_type_ids=None, position_ids=None, head_mask=None,
             is_training=True, encoder_history_states=None):
         outputs = self.bert(input_ids, img_feats=img_feats, attention_mask=attention_mask, 
                 position_ids=position_ids, token_type_ids=token_type_ids,
                 head_mask=head_mask,
                 encoder_history_states=encoder_history_states)
-        sequence_output = outputs[0][:, :masked_pos.shape[-1], :]
+        sequence_output = outputs[0][:, :masked_pos.shape[-1], :] # only get caption/label sequence portion
+        personality_tensor = self.personality_embedding(personality_ids)
 
         if is_training:
             # num_masks_in_batch * hidden_size
-            sequence_output_masked = sequence_output[masked_pos==1, :]
-            transformed_output_masked = self.transform(sequence_output_masked)
-            class_logits = self.decoder(transformed_output_masked)
+            mask_flags = masked_pos == 1
+            transformed_outputs = []
+            for i in range(sequence_output.size(0)):
+                seq_masked = sequence_output[i, mask_flags[i]]
+                transform_seq_masked = self.transform(seq_masked)
+                personality_repeat = personality_tensor[i].unsqueeze(0).repeat(transform_seq_masked.shape[0], 1)
+                concat = torch.cat((transform_seq_masked, personality_repeat), 1)
+                transformed_outputs.append(concat)
+
+            all_outputs = torch.cat(transformed_outputs, 0)
+            class_logits = self.decoder(self.personality_dense(all_outputs))
             masked_ids = masked_ids[masked_ids != 0]   # remove padding masks
             masked_loss = self.loss(class_logits.float(), masked_ids)
             outputs = (masked_loss, class_logits,) + outputs[2:]
         else:
-            class_logits = self.decoder(self.transform(sequence_output))
+            personality_repeat = personality_tensor.unsqueeze(1).repeat(1, masked_pos.shape[-1], 1)
+            concat_personality = torch.cat((sequence_output, personality_repeat), -1)
+            class_logits = self.decoder(self.personality_dense(concat_personality))
             outputs = (class_logits,) + outputs[2:]
         return outputs
 
@@ -562,9 +575,10 @@ class BertForImageCaptioning(CaptionPreTrainedModel):
             'encoder_history_states': self.prev_encoded_layers}
 
     def get_output_embeddings(self):
+        # TODO : find out if need to change
         return self.decoder
 
-    def generate(self, img_feats, attention_mask, masked_pos, token_type_ids=None,
+    def generate(self, personality_ids, img_feats, attention_mask, masked_pos, token_type_ids=None,
             position_ids=None, head_mask=None, input_ids=None, max_length=None,
             do_sample=None, num_beams=None, temperature=None, top_k=None, top_p=None,
             repetition_penalty=None, bos_token_id=None, pad_token_id=None,
@@ -641,6 +655,7 @@ class BertForImageCaptioning(CaptionPreTrainedModel):
         self.full_token_type_ids = self._expand_for_beams(token_type_ids, num_beams, num_fsm_states)
         self.full_position_ids = self._expand_for_beams(position_ids, num_beams, num_fsm_states)
         self.full_head_mask = self._expand_for_beams(head_mask, num_beams, num_fsm_states)
+        self.personality_ids = self._expand_for_beams(personality_ids, num_beams, num_fsm_states)
 
         if not use_cbs:
             if num_beams > 1:
@@ -659,6 +674,7 @@ class BertForImageCaptioning(CaptionPreTrainedModel):
                     length_penalty,
                     num_beams,
                     vocab_size,
+                    personality_ids
                 )
             else:
                 output = self._generate_no_beam_search(
