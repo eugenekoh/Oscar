@@ -420,7 +420,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
     """
     Bert for Image Captioning.
     """
-    def __init__(self, config, num_personalities=215):
+    def __init__(self, config, num_personalities=216):
         super(BertForPersonalityImageCaptioning, self).__init__(config)
         self.config = config
         self.bert = BertImgModel(config)
@@ -431,7 +431,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
         self.loss = nn.CrossEntropyLoss(reduction='mean')
         self.drop_worst_ratio = 0.2
 
-        self.personality_dense = nn.Linear(bert_embedding_weight.size(1) * 2, bert_embedding_weight.size(1))
+        self.fc = nn.Linear(bert_embedding_weight.size(1) * 2, bert_embedding_weight.size(1))
         self.personality_embedding = nn.Embedding(num_personalities, bert_embedding_weight.size(1))
 
     def forward(self, *args, **kwargs):
@@ -462,15 +462,18 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
                 concat = torch.cat((transform_seq_masked, personality_repeat), 1)
                 transformed_outputs.append(concat)
 
-            all_outputs = torch.cat(transformed_outputs, 0)
-            class_logits = self.decoder(self.personality_dense(all_outputs))
+            concat_personality = torch.cat(transformed_outputs, 0)
+            x = F.relu(self.fc(concat_personality))
+            class_logits = self.decoder(x)
             masked_ids = masked_ids[masked_ids != 0]   # remove padding masks
             masked_loss = self.loss(class_logits.float(), masked_ids)
             outputs = (masked_loss, class_logits,) + outputs[2:]
         else:
+            transformed_outputs = self.transform(sequence_output)
             personality_repeat = personality_tensor.unsqueeze(1).repeat(1, masked_pos.shape[-1], 1)
-            concat_personality = torch.cat((sequence_output, personality_repeat), -1)
-            class_logits = self.decoder(self.personality_dense(concat_personality))
+            concat_personality = torch.cat((transformed_outputs, personality_repeat), -1)
+            x = F.relu(self.fc(concat_personality))
+            class_logits = self.decoder(x)
             outputs = (class_logits,) + outputs[2:]
         return outputs
 

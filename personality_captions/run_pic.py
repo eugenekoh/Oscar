@@ -84,7 +84,7 @@ class CaptionTSVDataset(Dataset):
     def prepare_personality_to_index(self):
         with open(self.personality_file) as f:
             personalities = list(x.strip() for x in f.readlines())
-            assert len(personalities) == 215
+            assert len(personalities) == 216
         
         return {x : i for i, x in enumerate(personalities)}
 
@@ -482,7 +482,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                         batch_acc, global_acc / global_step)
                     )
                     writer.add_scalar("Loss/Loss", loss, global_step)
-                    writer.add_scalar("Loss/Global_Loss", global_loss, global_step)
+                    writer.add_scalar("Loss/Global_Loss", global_loss/global_step , global_step)
                     writer.add_scalar("Score/Score", batch_acc, global_step)
                     writer.add_scalar("Score/Global_Score", global_acc / global_step, global_step)
 
