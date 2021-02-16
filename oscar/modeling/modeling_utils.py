@@ -409,7 +409,7 @@ class CaptionPreTrainedModel(PreTrainedModel):
         done = [False for _ in range(batch_size)]
 
         while cur_len < max_length:
-            model_inputs = self.prepare_inputs_for_generation(input_ids, past=past)
+            model_inputs = self.prepare_inputs_for_generation(input_ids, past=past) # format dictionary
             model_inputs['personality_ids'] = self.personality_ids
             outputs = self(**model_inputs)  # (batch_size * num_beams, cur_len, vocab_size)
             if cur_len == 1:

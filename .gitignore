@@ -137,3 +137,6 @@ datasets
 models
 output
 experiments
+
+# drive
+.gd/
