@@ -19,8 +19,6 @@ from oscar.utils.misc import (mkdir, set_seed,
         load_from_yaml_file, find_file_path_in_yaml)
 from oscar.utils.caption_evaluate import (evaluate_on_coco_caption,
         evaluate_on_nocaps, ScstRewardCriterion)
-from oscar.utils.cbs import ConstraintFilter, ConstraintBoxesReader
-from oscar.utils.cbs import FiniteStateMachineBuilder
 from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
 from transformers.pytorch_transformers import BertTokenizer, BertConfig
 from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule, WarmupConstantSchedule
@@ -425,14 +423,17 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                     )
                     writer.add_scalar("Loss/Loss", loss, global_step)
                     writer.add_scalar("Loss/Global_Loss", global_loss/global_step , global_step)
-                    writer.add_scalar("Score/Score", batch_acc, global_step)
-                    writer.add_scalar("Score/Global_Score", global_acc / global_step, global_step)
+                    writer.add_scalar("Accuracy/Accuracy", batch_acc, global_step)
+                    writer.add_scalar("Accuracy/Global_Accuracy", global_acc / global_step, global_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
                     checkpoint_dir = save_checkpoint(model, tokenizer, args, epoch, global_step) 
                     # evaluation
-                    if args.evaluate_during_training: 
+                    if args.evaluate_during_training:
+                        logger.info("Perform validation at step: %d" % (global_step))
+                        val_loss, val_acc = validate(args, model, tokenizer)
+
                         logger.info("Perform evaluation at step: %d" % (global_step))
                         evaluate_file = evaluate(args, val_dataset, model, tokenizer,
                                 checkpoint_dir)
@@ -446,6 +447,9 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                         with open(args.output_dir + '/eval_logs.json', 'w') as f:
                             json.dump(eval_log, f)
 
+                        # update tensorboard
+                        writer.add_scalar("Loss/Val_Loss", val_loss, global_step)
+                        writer.add_scalar("Accuracy/Val_Accuracy", val_acc, global_step)
                         writer.add_scalar("Evaluation/Bleu_1", res['Bleu_1'], global_step)
                         writer.add_scalar("Evaluation/Bleu_2", res['Bleu_2'], global_step)
                         writer.add_scalar("Evaluation/Bleu_3", res['Bleu_3'], global_step)
@@ -456,6 +460,39 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                         writer.add_scalar("Evaluation/SPICE", res['SPICE'], global_step)
 
     return global_step, global_loss / global_step
+
+def validate(args, model, tokenizer):
+    val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args, is_train=True)
+    val_sampler = SequentialSampler(val_dataset)
+    train_dataloader = DataLoader(val_dataset, sampler=val_sampler,
+                                  batch_size=args.train_batch_size, num_workers=args.num_workers)
+    global_loss = global_acc = 0
+    global_step = 0
+    for step, (img_keys, batch) in enumerate(tqdm(train_dataloader)):
+        batch = tuple(t.to(args.device) for t in batch)
+
+        model.eval()
+        inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
+                  'token_type_ids': batch[2], 'img_feats': batch[3],
+                  'masked_pos': batch[4], 'masked_ids': batch[5],
+                  'personality_ids' : batch[6],
+                  }
+        outputs = model(**inputs)
+        loss, logits = outputs[:2]
+        masked_ids = inputs['masked_ids']
+        masked_ids = masked_ids[masked_ids != 0]
+        batch_score = compute_score_with_logits(logits, masked_ids)
+        batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
+
+        if args.n_gpu > 1:
+            loss = loss.mean() # mean() to average on multi-gpu parallel training
+        if args.gradient_accumulation_steps > 1:
+            loss = loss / args.gradient_accumulation_steps
+
+        global_step += 1
+        global_loss += loss.item()
+        global_acc += batch_acc
+    return (global_loss / global_step,  global_acc / global_step)
 
 def get_predict_file(output_dir, yaml_file, args):
     cc = ['pred']
@@ -542,7 +579,7 @@ def test(args, test_dataset, model, tokenizer, predict_file):
                         exist_key2pred[parts[0]] = parts[1]
 
         with torch.no_grad():
-            for step, (img_keys, batch) in tqdm(enumerate(test_dataloader)):
+            for step, (img_keys, batch) in enumerate(tqdm(test_dataloader)):
                 is_exist = True
                 for k in img_keys:
                     if k not in exist_key2pred:
