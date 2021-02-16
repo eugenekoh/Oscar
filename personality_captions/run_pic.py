@@ -84,7 +84,7 @@ class CaptionTSVDataset(Dataset):
     def prepare_personality_to_index(self):
         with open(self.personality_file) as f:
             personalities = list(x.strip() for x in f.readlines())
-            assert len(personalities) == 216
+            assert len(personalities) == 215
         
         return {x : i for i, x in enumerate(personalities)}
 
@@ -104,11 +104,9 @@ class CaptionTSVDataset(Dataset):
             return key2captions
 
     def get_image_index(self, idx):
-        if self.is_train:
-            img_cap_pair = self.captions[idx]
-            img_key = img_cap_pair['image_hash']
-            return self.key2index[img_key]
-        return idx
+        img_cap_pair = self.captions[idx]
+        img_key = img_cap_pair['image_hash']
+        return self.key2index[img_key]
 
     def get_image_key(self, idx):
         img_idx = self.get_image_index(idx)
@@ -160,54 +158,7 @@ class CaptionTSVDataset(Dataset):
         if self.is_train:
             return len(self.captions)
         return self.get_valid_tsv().num_rows()
-
-
-class CaptionTSVDatasetWithConstraints(CaptionTSVDataset):
-    r"""
-    Providing inputs for inference with Constraint Beam Search
-
-    nms_threshold: float, optional (default = 0.85)
-        NMS threshold for suppressing generic object class names during constraint filtering,
-        for two boxes with IoU higher than this threshold, "dog" suppresses "animal".
-    max_given_constraints: int, optional (default = 3)
-        Maximum number of constraints which can be specified for CBS decoding. Constraints are
-        selected based on the prediction confidence score of their corresponding bounding boxes.
-    """
-
-    def __init__(
-        self, yaml_file,
-        nms_threshold=0.85,
-        max_given_constraints=3, **kwargs
-    ):
-        super().__init__(yaml_file, **kwargs)
-        boxes_tsvpath = find_file_path_in_yaml(self.cfg['cbs_box'], self.root)
-        constraint2tokens_tsvpath = find_file_path_in_yaml(self.cfg['cbs_constraint'], self.root)
-        tokenforms_tsvpath = find_file_path_in_yaml(self.cfg['cbs_tokenforms'], self.root)
-        hierarchy_jsonpath = find_file_path_in_yaml(self.cfg['cbs_hierarchy'], self.root)
-
-        self._boxes_reader = ConstraintBoxesReader(boxes_tsvpath)
-        self._constraint_filter = ConstraintFilter(
-            hierarchy_jsonpath, nms_threshold, max_given_constraints
-        )
-        self._fsm_builder = FiniteStateMachineBuilder(self.tokenizer,
-                constraint2tokens_tsvpath, tokenforms_tsvpath,
-                max_given_constraints)
-
-    def __getitem__(self, index):
-        img_key, example = super().__getitem__(index)
-
-        # Apply constraint filtering to object class names.
-        constraint_boxes = self._boxes_reader[img_key]
-
-        candidates = self._constraint_filter(
-            constraint_boxes["boxes"], constraint_boxes["class_names"], constraint_boxes["scores"]
-        )
-        num_constraints = len(candidates)
-        fsm, nstates = self._fsm_builder.build(candidates)
-
-        return img_key, example + (fsm, num_constraints, )
-
-
+    
 class CaptionTensorizer(object):
     def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=70, 
             max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3,
@@ -352,10 +303,8 @@ def build_dataset(yaml_file, tokenizer, args, is_train=True):
             add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
             max_seq_length=args.max_seq_length, max_seq_a_length=args.max_seq_a_length,
             is_train=True, mask_prob=args.mask_prob, max_masked_tokens=args.max_masked_tokens)
-    if args.use_cbs:
-        dataset_class = CaptionTSVDatasetWithConstraints
-    else:
-        dataset_class = CaptionTSVDataset
+
+    dataset_class = CaptionTSVDataset
     return dataset_class(yaml_file, tokenizer=tokenizer,
             add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
             max_seq_length=args.max_seq_length, max_seq_a_length=args.max_gen_length,
@@ -433,10 +382,6 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    if args.scst:
-        scst_criterion = ScstRewardCriterion()
-        logger.info("  SCST training...")
-
     global_step, global_loss, global_acc =0,  0.0, 0.0
     model.zero_grad()
     eval_log = []
@@ -445,27 +390,24 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
         for step, (img_keys, batch) in enumerate(train_dataloader):
             batch = tuple(t.to(args.device) for t in batch)
 
-            if not args.scst:
-                model.train()
-                inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
-                    'token_type_ids': batch[2], 'img_feats': batch[3], 
-                    'masked_pos': batch[4], 'masked_ids': batch[5], 
-                    'personality_ids' : batch[6],
-                }
-                outputs = model(**inputs)
-                loss, logits = outputs[:2]
-                masked_ids = inputs['masked_ids']
-                masked_ids = masked_ids[masked_ids != 0]
-                batch_score = compute_score_with_logits(logits, masked_ids)
-                batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
-            else:
-                loss = scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch, tokenizer)
-                batch_acc = scst_criterion.get_score()
+            model.train()
+            inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
+                'token_type_ids': batch[2], 'img_feats': batch[3], 
+                'masked_pos': batch[4], 'masked_ids': batch[5], 
+                'personality_ids' : batch[6],
+            }
+            outputs = model(**inputs)
+            loss, logits = outputs[:2]
+            masked_ids = inputs['masked_ids']
+            masked_ids = masked_ids[masked_ids != 0]
+            batch_score = compute_score_with_logits(logits, masked_ids)
+            batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
 
             if args.n_gpu > 1: 
                 loss = loss.mean() # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             global_loss += loss.item()
@@ -515,64 +457,6 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
     return global_step, global_loss / global_step
 
-
-def scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch, tokenizer):
-    cls_token_id, sep_token_id, pad_token_id, mask_token_id = tokenizer.convert_tokens_to_ids(
-            [tokenizer.cls_token, tokenizer.sep_token, tokenizer.pad_token,
-                tokenizer.mask_token]
-            )
-    inputs = {'is_decode': True,
-        'input_ids': batch[0], 'attention_mask': batch[1],
-        'token_type_ids': batch[2], 'img_feats': batch[3],
-        'masked_pos': batch[4],
-        'do_sample': False,
-        'bos_token_id': cls_token_id,
-        'pad_token_id': pad_token_id,
-        'eos_token_ids': [sep_token_id, pad_token_id],
-        'mask_token_id': mask_token_id,
-        # for adding od labels
-        'add_od_labels': args.add_od_labels, 'od_labels_start_posid': args.max_seq_a_length,
-
-        # hyperparameters of beam search
-        'max_length': args.max_seq_a_length,
-        'num_beams': 1,
-        "temperature": args.temperature,
-        "top_k": args.top_k,
-        "top_p": args.top_p,
-        "repetition_penalty": args.repetition_penalty,
-        "length_penalty": args.length_penalty,
-        "num_return_sequences": 1,
-        "num_keep_best": 1,
-    }
-
-    model.eval()
-    with torch.no_grad():
-        greedy_res_raw, _ = model(**inputs)
-        greedy_res_raw.squeeze_(1)  # batch_size * max_len
-
-    model.train()
-    inputs['do_sample'] = True
-    sample_res_raw, sample_logprobs = model(**inputs)
-    sample_res_raw.squeeze_(1)
-    sample_logprobs.squeeze_(1)
-    assert sample_logprobs.requires_grad == True
-    assert sample_res_raw.requires_grad == False
-
-    def _ids_to_captions(all_ids):
-        captions = []
-        for ids in all_ids:
-            c = tokenizer.decode(ids.tolist(), skip_special_tokens=True)
-            captions.append(c)
-        return captions
-
-    greedy_res = _ids_to_captions(greedy_res_raw)
-    sample_res = _ids_to_captions(sample_res_raw)
-    gt_res = [train_dataset.get_captions_by_key(k) for k in img_keys]
-
-    loss = scst_criterion(gt_res, greedy_res, sample_res, sample_logprobs)
-    return loss
-
-
 def get_predict_file(output_dir, yaml_file, args):
     cc = ['pred']
     # make sure it works with/without / in end of the path.
@@ -588,8 +472,6 @@ def get_predict_file(output_dir, yaml_file, args):
         cc.append('odlabels')
     if args.num_keep_best != 1:
         cc.append('best{}'.format(args.num_keep_best))
-    if args.use_cbs:
-        cc.append('cbs{}'.format(args.min_constraints_to_satisfy))
     if args.output_hidden_states:
         cc.append('hidden')
     return op.join(output_dir, '{}.tsv'.format('.'.join(cc)))
@@ -695,12 +577,6 @@ def test(args, test_dataset, model, tokenizer, predict_file):
                     "num_return_sequences": args.num_return_sequences,
                     "num_keep_best": args.num_keep_best,
                 }
-                if args.use_cbs:
-                    inputs.update({'use_cbs': True,
-                        'fsm': batch[5],
-                        'num_constraints': batch[6],
-                        'min_constraints_to_satisfy': args.min_constraints_to_satisfy,
-                    })
                 tic = time.time()
                 # captions, logprobs
                 outputs = model(**inputs)
@@ -821,11 +697,11 @@ def main():
                         help="Run evaluation during training at each save_steps.")
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
-    parser.add_argument('--scst', action='store_true', help='Self-critical sequence training')
+
     # for generation
     parser.add_argument("--eval_model_dir", type=str, default='', 
                         help="Model directory for evaluation.")
-    parser.add_argument('--max_gen_length', type=int, default=20,
+    parser.add_argument('--max_gen_length', type=int, default=40,
                         help="max length of generated sentences")
     parser.add_argument('--output_hidden_states', action='store_true',
                         help="Turn on for fast decoding")
@@ -844,11 +720,6 @@ def main():
                         help="repetition penalty from CTRL paper (https://arxiv.org/abs/1909.05858)")
     parser.add_argument('--length_penalty', type=int, default=1,
                         help="beam search length penalty")
-    # for Constrained Beam Search
-    parser.add_argument('--use_cbs', action='store_true',
-                        help='Use constrained beam search for decoding')
-    parser.add_argument('--min_constraints_to_satisfy', type=int, default=2,
-                        help="minimum number of constraints to satisfy")
     args = parser.parse_args()
 
     global logger
@@ -869,9 +740,6 @@ def main():
         assert args.model_name_or_path is not None
         config = config_class.from_pretrained(args.config_name if args.config_name else \
                 args.model_name_or_path, num_labels=args.num_labels, finetuning_task='image_captioning')
-        if args.scst:
-            # avoid using too much memory
-            config.output_hidden_states = True
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name \
                 else args.model_name_or_path, do_lower_case=args.do_lower_case)
         config.img_feature_dim = args.img_feature_dim
@@ -907,10 +775,12 @@ def main():
             model = torch.nn.DataParallel(model)
 
         if not args.do_eval:
+            # generate captions only
             predict_file = get_predict_file(checkpoint, test_dataset.yaml_file, args)
             test(args, test_dataset, model, tokenizer, predict_file)
             logger.info("Prediction results saved to: {}".format(predict_file))
         else:
+            # add evaluation
             evaluate_file = evaluate(args, test_dataset, model, tokenizer,
                     checkpoint)
             logger.info("Evaluation results saved to: {}".format(evaluate_file))
