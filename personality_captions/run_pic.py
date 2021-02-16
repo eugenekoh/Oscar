@@ -1,34 +1,37 @@
 # Copyright (c) 2020 Microsoft Corporation. Licensed under the MIT license.
 
 from __future__ import absolute_import, division, print_function
+
 import argparse
-import base64
-import os.path as op
-import random, time, json
 import ast
+import base64
+import json
+import os.path as op
+import random
+import time
 
 import numpy as np
 import torch
+from tensorboardX import SummaryWriter
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
+from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
+from oscar.utils.caption_evaluate import (evaluate_on_coco_caption,
+                                          evaluate_on_nocaps)
 from oscar.utils.logger import setup_logger
+from oscar.utils.misc import (mkdir, set_seed,
+                              load_from_yaml_file, find_file_path_in_yaml)
 from oscar.utils.tsv_file import TSVFile
 from oscar.utils.tsv_file_ops import tsv_writer
-from oscar.utils.misc import (mkdir, set_seed, 
-        load_from_yaml_file, find_file_path_in_yaml)
-from oscar.utils.caption_evaluate import (evaluate_on_coco_caption,
-        evaluate_on_nocaps, ScstRewardCriterion)
-from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
-from transformers.pytorch_transformers import BertTokenizer, BertConfig
 from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule, WarmupConstantSchedule
-from tensorboardX import SummaryWriter
+from transformers.pytorch_transformers import BertTokenizer, BertConfig
 
 
 class CaptionTSVDataset(Dataset):
     def __init__(self, yaml_file, tokenizer=None, add_od_labels=True,
-            max_img_seq_length=50, max_seq_length=70, max_seq_a_length=40, 
-            is_train=True, mask_prob=0.15, max_masked_tokens=3, **kwargs):
+                 max_img_seq_length=50, max_seq_length=70, max_seq_a_length=40,
+                 is_train=True, mask_prob=0.15, max_masked_tokens=3, **kwargs):
         """Constructor.
         Args:
             yaml file with all required data (image feature, caption, labels, etc)
@@ -62,8 +65,8 @@ class CaptionTSVDataset(Dataset):
 
         self.tokenizer = tokenizer
         self.tensorizer = CaptionTensorizer(self.tokenizer, max_img_seq_length,
-                max_seq_length, max_seq_a_length, mask_prob, max_masked_tokens,
-                is_train=is_train)
+                                            max_seq_length, max_seq_a_length, mask_prob, max_masked_tokens,
+                                            is_train=is_train)
         self.add_od_labels = add_od_labels
         self.is_train = is_train
         self.kwargs = kwargs
@@ -83,8 +86,8 @@ class CaptionTSVDataset(Dataset):
         with open(self.personality_file) as f:
             personalities = list(x.strip() for x in f.readlines())
             assert len(personalities) == 215
-        
-        return {x : i for i, x in enumerate(personalities)}
+
+        return {x: i for i, x in enumerate(personalities)}
 
     def prepare_image_keys(self):
         tsv = self.get_valid_tsv()
@@ -92,7 +95,7 @@ class CaptionTSVDataset(Dataset):
 
     def prepare_image_key_to_index(self):
         tsv = self.get_valid_tsv()
-        return {tsv.seek(i)[0] : i for i in range(tsv.num_rows())}
+        return {tsv.seek(i)[0]: i for i in range(tsv.num_rows())}
 
     def prepare_image_key_to_captions(self):
         if self.is_train:
@@ -114,7 +117,7 @@ class CaptionTSVDataset(Dataset):
         feat_info = ast.literal_eval(self.feat_tsv.seek(img_idx)[1])
         num_boxes = feat_info['num_boxes']
         features = np.frombuffer(base64.b64decode(feat_info['features']), np.float32
-                ).reshape((num_boxes, -1))
+                                 ).reshape((num_boxes, -1))
         return torch.Tensor(features)
 
     def get_caption(self, idx):
@@ -156,11 +159,12 @@ class CaptionTSVDataset(Dataset):
         if self.is_train:
             return len(self.captions)
         return self.get_valid_tsv().num_rows()
-    
+
+
 class CaptionTensorizer(object):
-    def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=70, 
-            max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3,
-            is_train=True):
+    def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=70,
+                 max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3,
+                 is_train=True):
         """Constructor.
         Args:
             tokenizer: tokenizer for text processing.
@@ -178,13 +182,13 @@ class CaptionTensorizer(object):
         self.max_seq_a_len = max_seq_a_length
         self.mask_prob = mask_prob
         self.max_masked_tokens = max_masked_tokens
-        self._triangle_mask = torch.tril(torch.ones((self.max_seq_len, 
-            self.max_seq_len), dtype=torch.long))
+        self._triangle_mask = torch.tril(torch.ones((self.max_seq_len,
+                                                     self.max_seq_len), dtype=torch.long))
 
     def tensorize_example(self, text_a, img_feat, text_b=None,
-            cls_token_segment_id=0, pad_token_segment_id=0,
-            sequence_a_segment_id=0, sequence_b_segment_id=1,
-            personality=None):
+                          cls_token_segment_id=0, pad_token_segment_id=0,
+                          sequence_a_segment_id=0, sequence_b_segment_id=1,
+                          personality=None):
         if self.is_train:
             tokens_a = self.tokenizer.tokenize(text_a)
         else:
@@ -212,7 +216,7 @@ class CaptionTensorizer(object):
         if self.is_train:
             masked_pos = torch.zeros(self.max_seq_len, dtype=torch.int)
             # randomly mask words for prediction, ignore [CLS]
-            candidate_masked_idx = list(range(1, seq_a_len)) # only mask text_a
+            candidate_masked_idx = list(range(1, seq_a_len))  # only mask text_a
             random.shuffle(candidate_masked_idx)
             num_masked = min(max(round(self.mask_prob * seq_a_len), 1), self.max_masked_tokens)
             num_masked = int(num_masked)
@@ -233,11 +237,11 @@ class CaptionTensorizer(object):
                     # 10% chance to remain the same (1-0.8-0.1)
                     pass
 
-            masked_pos[masked_idx] = 1 
+            masked_pos[masked_idx] = 1
             # pad masked tokens to the same length
             if num_masked < self.max_masked_tokens:
                 masked_token = masked_token + ([self.tokenizer.pad_token] *
-                        (self.max_masked_tokens - num_masked))
+                                               (self.max_masked_tokens - num_masked))
             masked_ids = self.tokenizer.convert_tokens_to_ids(masked_token)
         else:
             masked_pos = torch.ones(self.max_seq_len, dtype=torch.int)
@@ -251,7 +255,7 @@ class CaptionTensorizer(object):
         # image features
         img_len = img_feat.shape[0]
         if img_len > self.max_img_seq_len:
-            img_feat = img_feat[0 : self.max_img_seq_len, ]
+            img_feat = img_feat[0: self.max_img_seq_len, ]
             img_len = img_feat.shape[0]
         else:
             padding_matrix = torch.zeros((self.max_img_seq_len - img_len,
@@ -269,16 +273,16 @@ class CaptionTensorizer(object):
         l_start, l_end = self.max_seq_a_len, seq_len
         r_start, r_end = self.max_seq_len, self.max_seq_len + img_len
         # triangle mask for caption to caption
-        attention_mask[c_start : c_end, c_start : c_end].copy_(self._triangle_mask[0 : seq_a_len, 0 : seq_a_len])
+        attention_mask[c_start: c_end, c_start: c_end].copy_(self._triangle_mask[0: seq_a_len, 0: seq_a_len])
         # full attention for L-L, R-R
-        attention_mask[l_start : l_end, l_start : l_end] = 1
-        attention_mask[r_start : r_end, r_start : r_end] = 1
+        attention_mask[l_start: l_end, l_start: l_end] = 1
+        attention_mask[r_start: r_end, r_start: r_end] = 1
         # full attention for C-L, C-R
-        attention_mask[c_start : c_end, l_start : l_end] = 1
-        attention_mask[c_start : c_end, r_start : r_end] = 1
+        attention_mask[c_start: c_end, l_start: l_end] = 1
+        attention_mask[c_start: c_end, r_start: r_end] = 1
         # full attention for L-R:
-        attention_mask[l_start : l_end, r_start : r_end] = 1
-        attention_mask[r_start : r_end, l_start : l_end] = 1
+        attention_mask[l_start: l_end, r_start: r_end] = 1
+        attention_mask[r_start: r_end, l_start: l_end] = 1
 
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         segment_ids = torch.tensor(segment_ids, dtype=torch.long)
@@ -298,22 +302,22 @@ def build_dataset(yaml_file, tokenizer, args, is_train=True):
 
     if is_train:
         return CaptionTSVDataset(yaml_file, tokenizer=tokenizer,
-            add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
-            max_seq_length=args.max_seq_length, max_seq_a_length=args.max_seq_a_length,
-            is_train=True, mask_prob=args.mask_prob, max_masked_tokens=args.max_masked_tokens)
+                                 add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
+                                 max_seq_length=args.max_seq_length, max_seq_a_length=args.max_seq_a_length,
+                                 is_train=True, mask_prob=args.mask_prob, max_masked_tokens=args.max_masked_tokens)
 
     dataset_class = CaptionTSVDataset
     return dataset_class(yaml_file, tokenizer=tokenizer,
-            add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
-            max_seq_length=args.max_seq_length, max_seq_a_length=args.max_gen_length,
-            is_train=False)
+                         add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
+                         max_seq_length=args.max_seq_length, max_seq_a_length=args.max_gen_length,
+                         is_train=False)
 
 
 def save_checkpoint(model, tokenizer, args, epoch, global_step):
     checkpoint_dir = op.join(args.output_dir, 'checkpoint-{}-{}'.format(
         epoch, global_step))
     mkdir(checkpoint_dir)
-    model_to_save = model.module if hasattr(model, 'module') else model 
+    model_to_save = model.module if hasattr(model, 'module') else model
     save_num = 0
     while (save_num < 10):
         try:
@@ -330,25 +334,25 @@ def save_checkpoint(model, tokenizer, args, epoch, global_step):
 
 
 def compute_score_with_logits(logits, labels):
-    logits = torch.max(logits, -1)[1].data # argmax
-    scores = logits == labels 
+    logits = torch.max(logits, -1)[1].data  # argmax
+    scores = logits == labels
     return scores
 
 
 def train(args, train_dataset, val_dataset, model, tokenizer):
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     writer = SummaryWriter()
-    train_sampler = RandomSampler(train_dataset) 
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, 
-            batch_size=args.train_batch_size, num_workers=args.num_workers)
+    train_sampler = RandomSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler,
+                                  batch_size=args.train_batch_size, num_workers=args.num_workers)
 
     if args.max_steps > 0:
         t_total = args.max_steps
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // \
-                args.gradient_accumulation_steps) + 1
+                                                   args.gradient_accumulation_steps) + 1
     else:
         t_total = len(train_dataloader) // args.gradient_accumulation_steps \
-                * args.num_train_epochs
+                  * args.num_train_epochs
 
     # Prepare optimizer and scheduler
     no_decay = ['bias', 'LayerNorm.weight']
@@ -356,15 +360,15 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
         {'params': [p for n, p in model.named_parameters() if not \
             any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters() if \
-            any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+                    any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = AdamW(grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     if args.scheduler == "constant":
         scheduler = WarmupConstantSchedule(
-                optimizer, warmup_steps=args.warmup_steps)
+            optimizer, warmup_steps=args.warmup_steps)
     elif args.scheduler == "linear":
         scheduler = WarmupLinearSchedule(
-                optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
+            optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
     else:
         raise ValueError("Unknown scheduler type: {}".format(args.scheduler))
 
@@ -376,11 +380,11 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
     logger.info("  Num Epochs = %d", args.num_train_epochs)
     logger.info("  Batch size per GPU = %d", args.per_gpu_train_batch_size)
     logger.info("  Total train batch size (w. parallel, & accumulation) = %d",
-                   args.train_batch_size * args.gradient_accumulation_steps)
+                args.train_batch_size * args.gradient_accumulation_steps)
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    global_step, global_loss, global_acc =0,  0.0, 0.0
+    global_step, global_loss, global_acc = 0, 0.0, 0.0
     model.zero_grad()
     eval_log = []
     best_score = 0
@@ -390,10 +394,10 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
             model.train()
             inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
-                'token_type_ids': batch[2], 'img_feats': batch[3], 
-                'masked_pos': batch[4], 'masked_ids': batch[5], 
-                'personality_ids' : batch[6],
-            }
+                      'token_type_ids': batch[2], 'img_feats': batch[3],
+                      'masked_pos': batch[4], 'masked_ids': batch[5],
+                      'personality_ids': batch[6],
+                      }
             outputs = model(**inputs)
             loss, logits = outputs[:2]
             masked_ids = inputs['masked_ids']
@@ -401,8 +405,8 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
             batch_score = compute_score_with_logits(logits, masked_ids)
             batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
 
-            if args.n_gpu > 1: 
-                loss = loss.mean() # mean() to average on multi-gpu parallel training
+            if args.n_gpu > 1:
+                loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
@@ -417,18 +421,19 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 model.zero_grad()
                 if global_step % args.logging_steps == 0:
                     logger.info("Epoch: {}, global_step: {}, lr: {:.6f}, loss: {:.4f} ({:.4f}), " \
-                        "score: {:.4f} ({:.4f})".format(epoch, global_step, 
-                        optimizer.param_groups[0]["lr"], loss, global_loss / global_step, 
-                        batch_acc, global_acc / global_step)
-                    )
+                                "score: {:.4f} ({:.4f})".format(epoch, global_step,
+                                                                optimizer.param_groups[0]["lr"], loss,
+                                                                global_loss / global_step,
+                                                                batch_acc, global_acc / global_step)
+                                )
                     writer.add_scalar("Loss/Loss", loss, global_step)
-                    writer.add_scalar("Loss/Global_Loss", global_loss/global_step , global_step)
+                    writer.add_scalar("Loss/Global_Loss", global_loss / global_step, global_step)
                     writer.add_scalar("Accuracy/Accuracy", batch_acc, global_step)
                     writer.add_scalar("Accuracy/Global_Accuracy", global_acc / global_step, global_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
-                    checkpoint_dir = save_checkpoint(model, tokenizer, args, epoch, global_step) 
+                    checkpoint_dir = save_checkpoint(model, tokenizer, args, epoch, global_step)
                     # evaluation
                     if args.evaluate_during_training:
                         logger.info("Perform validation at step: %d" % (global_step))
@@ -436,7 +441,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
                         logger.info("Perform evaluation at step: %d" % (global_step))
                         evaluate_file = evaluate(args, val_dataset, model, tokenizer,
-                                checkpoint_dir)
+                                                 checkpoint_dir)
                         with open(evaluate_file, 'r') as f:
                             res = json.load(f)
                         best_score = max(best_score, res['CIDEr'])
@@ -461,6 +466,7 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
     return global_step, global_loss / global_step
 
+
 def validate(args, model, tokenizer):
     val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args, is_train=True)
     val_sampler = SequentialSampler(val_dataset)
@@ -475,7 +481,7 @@ def validate(args, model, tokenizer):
         inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
                   'token_type_ids': batch[2], 'img_feats': batch[3],
                   'masked_pos': batch[4], 'masked_ids': batch[5],
-                  'personality_ids' : batch[6],
+                  'personality_ids': batch[6],
                   }
         outputs = model(**inputs)
         loss, logits = outputs[:2]
@@ -485,14 +491,15 @@ def validate(args, model, tokenizer):
         batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
 
         if args.n_gpu > 1:
-            loss = loss.mean() # mean() to average on multi-gpu parallel training
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
 
         global_step += 1
         global_loss += loss.item()
         global_acc += batch_acc
-    return (global_loss / global_step,  global_acc / global_step)
+    return (global_loss / global_step, global_acc / global_step)
+
 
 def get_predict_file(output_dir, yaml_file, args):
     cc = ['pred']
@@ -546,8 +553,8 @@ def evaluate(args, val_dataset, model, tokenizer, output_dir):
         result = evaluate_on_coco_caption(predict_file, gt_file, outfile=evaluate_file)
     else:
         split = 'val' if 'val' in op.basename(val_dataset.yaml_file) else 'test'
-        result = evaluate_on_nocaps(split, predict_file, 
-                    data_dir=args.data_dir, evaluate_file=evaluate_file)
+        result = evaluate_on_nocaps(split, predict_file,
+                                    data_dir=args.data_dir, evaluate_file=evaluate_file)
     logger.info("evaluation result: {}".format(str(result)))
     return evaluate_file
 
@@ -558,12 +565,12 @@ def test(args, test_dataset, model, tokenizer, predict_file):
     cache_file = predict_file
 
     test_dataloader = DataLoader(test_dataset, sampler=test_sampler,
-            batch_size=args.test_batch_size, num_workers=args.num_workers)
+                                 batch_size=args.test_batch_size, num_workers=args.num_workers)
 
     cls_token_id, sep_token_id, pad_token_id, mask_token_id, period_token_id = \
-        tokenizer.convert_tokens_to_ids( [tokenizer.cls_token, 
-            tokenizer.sep_token, tokenizer.pad_token, tokenizer.mask_token, '.']
-        )
+        tokenizer.convert_tokens_to_ids([tokenizer.cls_token,
+                                         tokenizer.sep_token, tokenizer.pad_token, tokenizer.mask_token, '.']
+                                        )
     model.eval()
 
     def gen_rows():
@@ -591,29 +598,29 @@ def test(args, test_dataset, model, tokenizer, predict_file):
                     continue
                 batch = tuple(t.to(args.device) for t in batch)
                 inputs = {'is_decode': True,
-                    'input_ids': batch[0], 'attention_mask': batch[1],
-                    'token_type_ids': batch[2], 'img_feats': batch[3],
-                    'masked_pos': batch[4],
-                    'personality_ids' : batch[5],
-                    'do_sample': False,
-                    'bos_token_id': cls_token_id,
-                    'pad_token_id': pad_token_id,
-                    'eos_token_ids': [sep_token_id, pad_token_id],
-                    'mask_token_id': mask_token_id,
-                    # for adding od labels
-                    'add_od_labels': args.add_od_labels, 'od_labels_start_posid': args.max_seq_a_length,
+                          'input_ids': batch[0], 'attention_mask': batch[1],
+                          'token_type_ids': batch[2], 'img_feats': batch[3],
+                          'masked_pos': batch[4],
+                          'personality_ids': batch[5],
+                          'do_sample': False,
+                          'bos_token_id': cls_token_id,
+                          'pad_token_id': pad_token_id,
+                          'eos_token_ids': [sep_token_id, pad_token_id],
+                          'mask_token_id': mask_token_id,
+                          # for adding od labels
+                          'add_od_labels': args.add_od_labels, 'od_labels_start_posid': args.max_seq_a_length,
 
-                    # hyperparameters of beam search
-                    'max_length': args.max_gen_length,
-                    'num_beams': args.num_beams,
-                    "temperature": args.temperature,
-                    "top_k": args.top_k,
-                    "top_p": args.top_p,
-                    "repetition_penalty": args.repetition_penalty,
-                    "length_penalty": args.length_penalty,
-                    "num_return_sequences": args.num_return_sequences,
-                    "num_keep_best": args.num_keep_best,
-                }
+                          # hyperparameters of beam search
+                          'max_length': args.max_gen_length,
+                          'num_beams': args.num_beams,
+                          "temperature": args.temperature,
+                          "top_k": args.top_k,
+                          "top_p": args.top_p,
+                          "repetition_penalty": args.repetition_penalty,
+                          "length_penalty": args.length_penalty,
+                          "num_return_sequences": args.num_return_sequences,
+                          "num_keep_best": args.num_keep_best,
+                          }
                 tic = time.time()
                 # captions, logprobs
                 outputs = model(**inputs)
@@ -630,7 +637,7 @@ def test(args, test_dataset, model, tokenizer, predict_file):
                         img_key = img_key.item()
                     yield img_key, json.dumps(res)
 
-        logger.info("Inference model computing time: {} seconds per batch".format(time_meter / (step+1)))
+        logger.info("Inference model computing time: {} seconds per batch".format(time_meter / (step + 1)))
 
     tsv_writer(gen_rows(), cache_file)
     return predict_file
@@ -646,18 +653,18 @@ def restore_training_settings(args):
         max_seq_length = args.max_gen_length + max_od_labels_len
         args.max_seq_length = max_seq_length
         logger.warning('Override max_seq_length to {} = max_gen_length:{} + od_labels_len:{}'.format(
-                max_seq_length, args.max_gen_length, max_od_labels_len))
+            max_seq_length, args.max_gen_length, max_od_labels_len))
 
     override_params = ['max_seq_a_length', 'do_lower_case', 'add_od_labels',
-            'max_img_seq_length', 'img_feature_dim',
-            'img_feature_type']
+                       'max_img_seq_length', 'img_feature_dim',
+                       'img_feature_type']
     for param in override_params:
         if hasattr(train_args, param):
             train_v = getattr(train_args, param)
             test_v = getattr(args, param)
             if train_v != test_v:
                 logger.warning('Override {} with train args: {} -> {}'.format(param,
-                    test_v, train_v))
+                                                                              test_v, train_v))
                 setattr(args, param, train_v)
     return args
 
@@ -666,53 +673,53 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default='datasets/coco_caption', type=str, required=False,
                         help="The input data dir with all required files.")
-    parser.add_argument("--train_yaml", default='train.yaml', type=str, required=False, 
+    parser.add_argument("--train_yaml", default='train.yaml', type=str, required=False,
                         help="yaml file for training.")
     parser.add_argument("--test_yaml", default='test.yaml', type=str, required=False,
                         help="yaml file for testing.")
-    parser.add_argument("--val_yaml", default='val.yaml', type=str, required=False, 
+    parser.add_argument("--val_yaml", default='val.yaml', type=str, required=False,
                         help="yaml file used for validation during training.")
     parser.add_argument("--model_name_or_path", default=None, type=str, required=False,
                         help="Path to pre-trained model or model type.")
     parser.add_argument("--output_dir", default='output/', type=str, required=False,
                         help="The output directory to save checkpoint and test results.")
-    parser.add_argument("--loss_type", default='sfmx', type=str, 
+    parser.add_argument("--loss_type", default='sfmx', type=str,
                         help="Loss function types: support kl, x2, sfmx")
-    parser.add_argument("--config_name", default="", type=str, 
+    parser.add_argument("--config_name", default="", type=str,
                         help="Pretrained config name or path if not the same as model_name.")
-    parser.add_argument("--tokenizer_name", default="", type=str, 
+    parser.add_argument("--tokenizer_name", default="", type=str,
                         help="Pretrained tokenizer name or path if not the same as model_name.")
     parser.add_argument("--max_seq_length", default=70, type=int,
                         help="The maximum total input sequence length after tokenization. "
                              "Sequences longer than this will be truncated, "
                              "sequences shorter will be padded.")
-    parser.add_argument("--max_seq_a_length", default=40, type=int, 
+    parser.add_argument("--max_seq_a_length", default=40, type=int,
                         help="The maximum sequence length for caption.")
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_test", action='store_true', help="Whether to run inference.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run evaluation.")
-    parser.add_argument("--do_lower_case", action='store_true', 
+    parser.add_argument("--do_lower_case", action='store_true',
                         help="Set this flag if you are using an uncased model.")
     parser.add_argument("--mask_prob", default=0.15, type=float,
-                        help= "Probability to mask input sentence during training.")
+                        help="Probability to mask input sentence during training.")
     parser.add_argument("--max_masked_tokens", type=int, default=3,
                         help="The max number of masked tokens per sentence.")
-    parser.add_argument("--add_od_labels", default=False, action='store_true', 
+    parser.add_argument("--add_od_labels", default=False, action='store_true',
                         help="Whether to add object detection labels or not")
     parser.add_argument("--drop_out", default=0.1, type=float, help="Drop out in BERT.")
-    parser.add_argument("--max_img_seq_length", default=50, type=int, 
+    parser.add_argument("--max_img_seq_length", default=50, type=int,
                         help="The maximum total input image sequence length.")
-    parser.add_argument("--img_feature_dim", default=2054, type=int, 
+    parser.add_argument("--img_feature_dim", default=2054, type=int,
                         help="The Image Feature Dimension.")
     parser.add_argument("--img_feature_type", default='frcnn', type=str,
                         help="Image feature type.")
-    parser.add_argument("--per_gpu_train_batch_size", default=64, type=int, 
+    parser.add_argument("--per_gpu_train_batch_size", default=64, type=int,
                         help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--per_gpu_eval_batch_size", default=64, type=int, 
+    parser.add_argument("--per_gpu_eval_batch_size", default=64, type=int,
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument("--output_mode", default='classification', type=str,
                         help="output mode, support classification or regression.")
-    parser.add_argument("--num_labels", default=2, type=int, 
+    parser.add_argument("--num_labels", default=2, type=int,
                         help="num_labels is 2 for classification and 1 for regression.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before backward.")
@@ -723,20 +730,20 @@ def main():
     parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup.")
     parser.add_argument("--scheduler", default='linear', type=str, help="constant or linear or")
     parser.add_argument("--num_workers", default=4, type=int, help="Workers in dataloader.")
-    parser.add_argument("--num_train_epochs", default=40, type=int, 
+    parser.add_argument("--num_train_epochs", default=40, type=int,
                         help="Total number of training epochs to perform.")
-    parser.add_argument("--max_steps", default=-1, type=int, 
+    parser.add_argument("--max_steps", default=-1, type=int,
                         help="Total number of training steps. Override num_train_epochs.")
     parser.add_argument('--logging_steps', type=int, default=20, help="Log every X steps.")
-    parser.add_argument('--save_steps', type=int, default=-1, 
+    parser.add_argument('--save_steps', type=int, default=-1,
                         help="Save checkpoint every X steps. Will also perform evaluatin.")
-    parser.add_argument("--evaluate_during_training", action='store_true', 
+    parser.add_argument("--evaluate_during_training", action='store_true',
                         help="Run evaluation during training at each save_steps.")
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
 
     # for generation
-    parser.add_argument("--eval_model_dir", type=str, default='', 
+    parser.add_argument("--eval_model_dir", type=str, default='',
                         help="Model directory for evaluation.")
     parser.add_argument('--max_gen_length', type=int, default=40,
                         help="max length of generated sentences")
@@ -763,7 +770,7 @@ def main():
 
     args.device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     args.n_gpu = torch.cuda.device_count()
-    
+
     output_dir = args.output_dir
     mkdir(output_dir)
 
@@ -772,19 +779,20 @@ def main():
     set_seed(args.seed, args.n_gpu)
 
     # Load pretrained model and tokenizer
-    config_class, model_class, tokenizer_class = BertConfig, BertForPersonalityImageCaptioning , BertTokenizer
+    config_class, model_class, tokenizer_class = BertConfig, BertForPersonalityImageCaptioning, BertTokenizer
     if args.do_train:
         assert args.model_name_or_path is not None
         config = config_class.from_pretrained(args.config_name if args.config_name else \
-                args.model_name_or_path, num_labels=args.num_labels, finetuning_task='image_captioning')
+                                                  args.model_name_or_path, num_labels=args.num_labels,
+                                              finetuning_task='image_captioning')
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name \
-                else args.model_name_or_path, do_lower_case=args.do_lower_case)
+                                                        else args.model_name_or_path, do_lower_case=args.do_lower_case)
         config.img_feature_dim = args.img_feature_dim
         config.img_feature_type = args.img_feature_type
         config.hidden_dropout_prob = args.drop_out
-        config.loss_type = args.loss_type 
-        model = model_class.from_pretrained(args.model_name_or_path, 
-                from_tf=bool('.ckpt' in args.model_name_or_path), config=config)
+        config.loss_type = args.loss_type
+        model = model_class.from_pretrained(args.model_name_or_path,
+                                            from_tf=bool('.ckpt' in args.model_name_or_path), config=config)
     else:
         checkpoint = args.eval_model_dir
         assert op.isdir(checkpoint)
@@ -798,16 +806,16 @@ def main():
     logger.info("Training/evaluation parameters %s", args)
     if args.do_train:
         train_dataset = build_dataset(op.join(args.data_dir, args.train_yaml), tokenizer, args)
-        val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), 
-                tokenizer, args, is_train=False)
+        val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml),
+                                    tokenizer, args, is_train=False)
         global_step, avg_loss = train(args, train_dataset, val_dataset, model, tokenizer)
         logger.info("Training done: total_step = %s, avg loss = %s", global_step, avg_loss)
 
     # inference and evaluation
     if args.do_test or args.do_eval:
         args = restore_training_settings(args)
-        test_dataset = build_dataset(op.join(args.data_dir, args.test_yaml), 
-                tokenizer, args, is_train=False)
+        test_dataset = build_dataset(op.join(args.data_dir, args.test_yaml),
+                                     tokenizer, args, is_train=False)
         if args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
@@ -819,8 +827,9 @@ def main():
         else:
             # add evaluation
             evaluate_file = evaluate(args, test_dataset, model, tokenizer,
-                    checkpoint)
+                                     checkpoint)
             logger.info("Evaluation results saved to: {}".format(evaluate_file))
+
 
 if __name__ == "__main__":
     main()
