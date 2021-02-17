@@ -513,10 +513,11 @@ def scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch,
 
 
 def validate(args, model, tokenizer):
+    args.val_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args, is_train=True)
     val_sampler = SequentialSampler(val_dataset)
     train_dataloader = DataLoader(val_dataset, sampler=val_sampler,
-                                  batch_size=int(args.train_batch_size / 2), num_workers=args.num_workers)
+                                  batch_size=args.val_batch_size, num_workers=args.num_workers)
     global_loss = global_acc = 0
     global_step = 0
     for step, (img_keys, batch) in enumerate(train_dataloader):
