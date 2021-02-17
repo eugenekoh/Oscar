@@ -14,4 +14,7 @@ python personality_captions/run_pic.py \
 	--data_dir datasets/personality_captions \
 	--train_yaml train.yaml \
 	--val_yaml val.yaml \
-	--num_workers 4
+	--num_workers 4 \
+	--tensorboard_log_dir runs/pic \
+	--global_step_offset 80
+

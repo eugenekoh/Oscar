@@ -339,9 +339,9 @@ def compute_score_with_logits(logits, labels):
     return scores
 
 
-def train(args, train_dataset, val_dataset, model, tokenizer):
+def train(args, train_dataset, model, tokenizer):
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    writer = SummaryWriter()
+    writer = SummaryWriter(logdir=args.tensorboard_log_dir)
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler,
                                   batch_size=args.train_batch_size, num_workers=args.num_workers)
@@ -386,8 +386,6 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
 
     global_step, global_loss, global_acc = 0, 0.0, 0.0
     model.zero_grad()
-    eval_log = []
-    best_score = 0
     for epoch in range(int(args.num_train_epochs)):
         for step, (img_keys, batch) in enumerate(train_dataloader):
             batch = tuple(t.to(args.device) for t in batch)
@@ -419,50 +417,31 @@ def train(args, train_dataset, val_dataset, model, tokenizer):
                 scheduler.step()
                 optimizer.step()
                 model.zero_grad()
+
+                tensorboard_step = global_step + args.global_step_offset
                 if global_step % args.logging_steps == 0:
                     logger.info("Epoch: {}, global_step: {}, lr: {:.6f}, loss: {:.4f} ({:.4f}), " \
-                                "score: {:.4f} ({:.4f})".format(epoch, global_step,
+                                "score: {:.4f} ({:.4f})".format(epoch, tensorboard_step,
                                                                 optimizer.param_groups[0]["lr"], loss,
                                                                 global_loss / global_step,
                                                                 batch_acc, global_acc / global_step)
                                 )
-                    writer.add_scalar("Loss/Loss", loss, global_step)
-                    writer.add_scalar("Loss/Global_Loss", global_loss / global_step, global_step)
-                    writer.add_scalar("Accuracy/Accuracy", batch_acc, global_step)
-                    writer.add_scalar("Accuracy/Global_Accuracy", global_acc / global_step, global_step)
+                    writer.add_scalar("Loss/Loss", loss, tensorboard_step)
+                    writer.add_scalar("Loss/Global_Loss", global_loss / global_step, tensorboard_step)
+                    writer.add_scalar("Accuracy/Accuracy", batch_acc, tensorboard_step)
+                    writer.add_scalar("Accuracy/Global_Accuracy", global_acc / global_step, tensorboard_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
-                    checkpoint_dir = save_checkpoint(model, tokenizer, args, epoch, global_step)
+                    _ = save_checkpoint(model, tokenizer, args, epoch, tensorboard_step)
                     # evaluation
                     if args.evaluate_during_training:
-                        logger.info("Perform validation at step: %d" % (global_step))
+                        logger.info("Perform validation at step: %d" % tensorboard_step)
                         val_loss, val_acc = validate(args, model, tokenizer)
 
-                        logger.info("Perform evaluation at step: %d" % (global_step))
-                        evaluate_file = evaluate(args, val_dataset, model, tokenizer,
-                                                 checkpoint_dir)
-                        with open(evaluate_file, 'r') as f:
-                            res = json.load(f)
-                        best_score = max(best_score, res['CIDEr'])
-                        res['epoch'] = epoch
-                        res['global_step'] = step
-                        res['best_CIDEr'] = best_score
-                        eval_log.append(res)
-                        with open(args.output_dir + '/eval_logs.json', 'w') as f:
-                            json.dump(eval_log, f)
-
                         # update tensorboard
-                        writer.add_scalar("Loss/Val_Loss", val_loss, global_step)
-                        writer.add_scalar("Accuracy/Val_Accuracy", val_acc, global_step)
-                        writer.add_scalar("Evaluation/Bleu_1", res['Bleu_1'], global_step)
-                        writer.add_scalar("Evaluation/Bleu_2", res['Bleu_2'], global_step)
-                        writer.add_scalar("Evaluation/Bleu_3", res['Bleu_3'], global_step)
-                        writer.add_scalar("Evaluation/Bleu_4", res['Bleu_4'], global_step)
-                        writer.add_scalar("Evaluation/METEOR", res['METEOR'], global_step)
-                        writer.add_scalar("Evaluation/ROUGE_L", res['ROUGE_L'], global_step)
-                        writer.add_scalar("Evaluation/CIDEr", res['CIDEr'], global_step)
-                        writer.add_scalar("Evaluation/SPICE", res['SPICE'], global_step)
+                        writer.add_scalar("Loss/Val_Loss", val_loss, tensorboard_step)
+                        writer.add_scalar("Accuracy/Val_Accuracy", val_acc, tensorboard_step)
 
     return global_step, global_loss / global_step
 
@@ -471,7 +450,7 @@ def validate(args, model, tokenizer):
     val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args, is_train=True)
     val_sampler = SequentialSampler(val_dataset)
     train_dataloader = DataLoader(val_dataset, sampler=val_sampler,
-                                  batch_size=args.train_batch_size, num_workers=args.num_workers)
+                                  batch_size=args.train_batch_size/2, num_workers=args.num_workers)
     global_loss = global_acc = 0
     global_step = 0
     for step, (img_keys, batch) in enumerate(tqdm(train_dataloader)):
@@ -498,7 +477,7 @@ def validate(args, model, tokenizer):
         global_step += 1
         global_loss += loss.item()
         global_acc += batch_acc
-    return (global_loss / global_step, global_acc / global_step)
+    return global_loss / global_step, global_acc / global_step
 
 
 def get_predict_file(output_dir, yaml_file, args):
@@ -742,6 +721,10 @@ def main():
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
 
+    # for tensorboard
+    parser.add_argument('--global_step_offset', type=int, default=0, help="global step offset for logging to directory")
+    parser.add_argument('--tensorboard_log_dir', type=str, default='runs/pic', help="directory to store runs info")
+
     # for generation
     parser.add_argument("--eval_model_dir", type=str, default='',
                         help="Model directory for evaluation.")
@@ -806,9 +789,7 @@ def main():
     logger.info("Training/evaluation parameters %s", args)
     if args.do_train:
         train_dataset = build_dataset(op.join(args.data_dir, args.train_yaml), tokenizer, args)
-        val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml),
-                                    tokenizer, args, is_train=False)
-        global_step, avg_loss = train(args, train_dataset, val_dataset, model, tokenizer)
+        global_step, avg_loss = train(args, train_dataset, model, tokenizer)
         logger.info("Training done: total_step = %s, avg loss = %s", global_step, avg_loss)
 
     # inference and evaluation
