@@ -453,7 +453,7 @@ def validate(args, model, tokenizer):
                                   batch_size=int(args.train_batch_size/2), num_workers=args.num_workers)
     global_loss = global_acc = 0
     global_step = 0
-    for step, (img_keys, batch) in enumerate(tqdm(train_dataloader)):
+    for step, (img_keys, batch) in enumerate(train_dataloader):
         batch = tuple(t.to(args.device) for t in batch)
 
         model.eval()
