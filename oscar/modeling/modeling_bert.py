@@ -665,7 +665,6 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
         self.full_position_ids = self._expand_for_beams(position_ids, num_beams, num_fsm_states)
         self.full_head_mask = self._expand_for_beams(head_mask, num_beams, num_fsm_states)
         self.personality_ids = self._expand_for_beams(personality_ids, num_beams, num_fsm_states)
-
         if not use_cbs:
             if num_beams > 1:
                 output = self._generate_beam_search(
@@ -682,8 +681,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
                     effective_batch_size,
                     length_penalty,
                     num_beams,
-                    vocab_size,
-                    personality_ids
+                    vocab_size
                 )
             else:
                 output = self._generate_no_beam_search(
@@ -697,7 +695,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
                     repetition_penalty,
                     pad_token_id,
                     eos_token_ids,
-                    effective_batch_size,
+                    effective_batch_size
                 )
         else:
             assert self.num_keep_best == 1, 'not supported n_best > 1 for CBS'

@@ -283,6 +283,7 @@ class CaptionPreTrainedModel(PreTrainedModel):
 
         while cur_len < max_length:
             model_inputs = self.prepare_inputs_for_generation(input_ids, past=past)
+            model_inputs['personality_ids'] = self.personality_ids
             outputs = self(**model_inputs)
             if cur_len == 1:
                 token_len = 2 + self.od_labels_len
@@ -379,7 +380,6 @@ class CaptionPreTrainedModel(PreTrainedModel):
         length_penalty,
         num_beams,
         vocab_size,
-        personality_ids
     ):
         """ Generate sequences for each example with beam search.
         """
