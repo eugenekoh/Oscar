@@ -118,7 +118,7 @@ class CaptionTSVDataset(Dataset):
         num_boxes = feat_info['num_boxes']
         features = np.frombuffer(base64.b64decode(feat_info['features']), np.float32
                                  ).reshape((num_boxes, -1))
-        return torch.Tensor(features)
+        return torch.from_numpy(features.copy())
 
     def get_caption(self, idx):
         if self.is_train:
@@ -340,11 +340,20 @@ def compute_score_with_logits(logits, labels):
 
 
 def train(args, train_dataset, model, tokenizer):
+    # setup datasets
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    writer = SummaryWriter(logdir=args.tensorboard_log_dir)
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler,
                                   batch_size=args.train_batch_size, num_workers=args.num_workers)
+
+    args.val_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args,
+                                is_train=True)
+    val_sampler = SequentialSampler(val_dataset)
+    val_dataloader = DataLoader(val_dataset, sampler=val_sampler,
+                                batch_size=args.val_batch_size, num_workers=args.num_workers)
+
+    writer = SummaryWriter(logdir=args.tensorboard_log_dir)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -422,8 +431,8 @@ def train(args, train_dataset, model, tokenizer):
             global_acc += batch_acc
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 global_step += 1
-                scheduler.step()
                 optimizer.step()
+                scheduler.step()
                 model.zero_grad()
 
                 tensorboard_step = global_step + args.global_step_offset
@@ -436,8 +445,10 @@ def train(args, train_dataset, model, tokenizer):
                                 )
                     writer.add_scalar("Loss/Loss", loss, tensorboard_step)
                     writer.add_scalar("Loss/Global_Loss", global_loss / global_step, tensorboard_step)
-                    writer.add_scalar("Accuracy/Accuracy", batch_acc, tensorboard_step)
-                    writer.add_scalar("Accuracy/Global_Accuracy", global_acc / global_step, tensorboard_step)
+
+                    score_type = 'SCST_Score' if args.scst else 'MLM_Accuracy'
+                    writer.add_scalar(f"Score/{score_type}", batch_acc, tensorboard_step)
+                    writer.add_scalar(f"Accuracy/Global_{score_type}", global_acc / global_step, tensorboard_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
@@ -445,11 +456,17 @@ def train(args, train_dataset, model, tokenizer):
                     # evaluation
                     if args.evaluate_during_training:
                         logger.info("Perform validation at step: %d" % tensorboard_step)
-                        val_loss, val_acc = validate(args, model, tokenizer)
+
+                        # Get MTL Validation
+                        metrics = validate(args, val_dataloader, model, scst_criterion, tokenizer)
 
                         # update tensorboard
-                        writer.add_scalar("Loss/Val_Loss", val_loss, tensorboard_step)
-                        writer.add_scalar("Accuracy/Val_Accuracy", val_acc, tensorboard_step)
+                        writer.add_scalar("Loss/Val_MLM_Loss", metrics['val_mlm_loss'], tensorboard_step)
+                        writer.add_scalar("Score/Val_MLM_Accuracy", metrics['val_mlm_acc'], tensorboard_step)
+
+                        if args.scst:
+                            writer.add_scalar("Loss/Val_SCST_Loss", metrics['val_scst_loss'], tensorboard_step)
+                            writer.add_scalar("Score/Val_SCST_Score", metrics['val_scst_acc'], tensorboard_step)
 
     return global_step, global_loss / global_step
 
@@ -489,7 +506,7 @@ def scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch,
         greedy_res_raw, _ = model(**inputs)
         greedy_res_raw.squeeze_(1)  # batch_size * max_len
 
-    model.train()
+    model.train()  # TODO: why activate train here
     inputs['do_sample'] = True
     sample_res_raw, sample_logprobs = model(**inputs)
     sample_res_raw.squeeze_(1)
@@ -512,17 +529,15 @@ def scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch,
     return loss
 
 
-def validate(args, model, tokenizer):
-    args.val_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-    val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args, is_train=True)
-    val_sampler = SequentialSampler(val_dataset)
-    train_dataloader = DataLoader(val_dataset, sampler=val_sampler,
-                                  batch_size=args.val_batch_size, num_workers=args.num_workers)
-    global_loss = global_acc = 0
+def validate(args, val_dataloader, model, scst_criterion, tokenizer):
+    mlm_global_loss = mlm_global_acc = 0
+    scst_global_loss = scst_global_score = 0
     global_step = 0
-    for step, (img_keys, batch) in enumerate(train_dataloader):
+    for step, (img_keys, batch) in enumerate(tqdm(val_dataloader)):
+        global_step += 1
         batch = tuple(t.to(args.device) for t in batch)
 
+        # mtl
         model.eval()
         inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
                   'token_type_ids': batch[2], 'img_feats': batch[3],
@@ -530,21 +545,33 @@ def validate(args, model, tokenizer):
                   'personality_ids': batch[6],
                   }
         outputs = model(**inputs)
-        loss, logits = outputs[:2]
+        mlm_loss, logits = outputs[:2]
         masked_ids = inputs['masked_ids']
         masked_ids = masked_ids[masked_ids != 0]
         batch_score = compute_score_with_logits(logits, masked_ids)
-        batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
-
+        mlm_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
         if args.n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu parallel training
-        if args.gradient_accumulation_steps > 1:
-            loss = loss / args.gradient_accumulation_steps
+            mlm_loss = mlm_loss.mean()  # mean() to average on multi-gpu parallel training
+        mlm_loss = mlm_loss.item()
+        mlm_global_loss += mlm_loss
+        mlm_global_acc += mlm_acc
 
-        global_step += 1
-        global_loss += loss.item()
-        global_acc += batch_acc
-    return global_loss / global_step, global_acc / global_step
+        if args.scst:
+            scst_loss = scst_train_iter(args, val_dataloader.dataset, model, scst_criterion, img_keys, batch, tokenizer)
+            scst_loss = scst_loss.item()
+            scst_score = scst_criterion.get_score()
+            if args.n_gpu > 1:
+                scst_loss = scst_loss.mean()  # mean() to average on multi-gpu parallel training
+            scst_loss = scst_loss.mean()
+            scst_global_loss += scst_loss
+            scst_global_score += scst_score
+
+    return {
+        'val_mlm_loss': mlm_global_loss / global_step,
+        'val_mlm_acc': mlm_global_acc / global_step,
+        'val_scst_loss': scst_global_loss / global_step,
+        'val_scst_acc': scst_global_score / global_step
+    }
 
 
 def get_predict_file(output_dir, yaml_file, args):
