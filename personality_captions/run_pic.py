@@ -533,38 +533,37 @@ def validate(args, val_dataloader, model, scst_criterion, tokenizer):
     mlm_global_loss = mlm_global_acc = 0
     scst_global_loss = scst_global_score = 0
     global_step = 0
-    for step, (img_keys, batch) in enumerate(tqdm(val_dataloader)):
-        global_step += 1
-        batch = tuple(t.to(args.device) for t in batch)
+    with torch.no_grad():
+        for step, (img_keys, batch) in enumerate(tqdm(val_dataloader)):
+            global_step += 1
+            batch = tuple(t.to(args.device) for t in batch)
 
-        # mtl
-        model.eval()
-        inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
-                  'token_type_ids': batch[2], 'img_feats': batch[3],
-                  'masked_pos': batch[4], 'masked_ids': batch[5],
-                  'personality_ids': batch[6],
-                  }
-        outputs = model(**inputs)
-        mlm_loss, logits = outputs[:2]
-        masked_ids = inputs['masked_ids']
-        masked_ids = masked_ids[masked_ids != 0]
-        batch_score = compute_score_with_logits(logits, masked_ids)
-        mlm_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
-        if args.n_gpu > 1:
-            mlm_loss = mlm_loss.mean()  # mean() to average on multi-gpu parallel training
-        mlm_loss = mlm_loss.item()
-        mlm_global_loss += mlm_loss
-        mlm_global_acc += mlm_acc
-
-        if args.scst:
-            scst_loss = scst_train_iter(args, val_dataloader.dataset, model, scst_criterion, img_keys, batch, tokenizer)
-            scst_loss = scst_loss.item()
-            scst_score = scst_criterion.get_score()
+            # mtl
+            model.eval()
+            inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
+                      'token_type_ids': batch[2], 'img_feats': batch[3],
+                      'masked_pos': batch[4], 'masked_ids': batch[5],
+                      'personality_ids': batch[6],
+                      }
+            outputs = model(**inputs)
+            mlm_loss, logits = outputs[:2]
+            masked_ids = inputs['masked_ids']
+            masked_ids = masked_ids[masked_ids != 0]
+            batch_score = compute_score_with_logits(logits, masked_ids)
+            mlm_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
             if args.n_gpu > 1:
-                scst_loss = scst_loss.mean()  # mean() to average on multi-gpu parallel training
-            scst_loss = scst_loss.mean()
-            scst_global_loss += scst_loss
-            scst_global_score += scst_score
+                mlm_loss = mlm_loss.mean()  # mean() to average on multi-gpu parallel training
+            mlm_loss = mlm_loss.item()
+            mlm_global_loss += mlm_loss
+            mlm_global_acc += mlm_acc
+
+            if args.scst:
+                scst_loss = scst_train_iter(args, val_dataloader.dataset, model, scst_criterion, img_keys, batch, tokenizer)
+                scst_loss = scst_loss.item()
+                scst_score = scst_criterion.get_score()
+                scst_loss = scst_loss.item()
+                scst_global_loss += scst_loss
+                scst_global_score += scst_score
 
     return {
         'val_mlm_loss': mlm_global_loss / global_step,
