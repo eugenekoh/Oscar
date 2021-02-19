@@ -12,8 +12,8 @@ import time
 
 import numpy as np
 import torch
-from tensorboardX import SummaryWriter
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
