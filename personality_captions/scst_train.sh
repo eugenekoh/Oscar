@@ -1,5 +1,5 @@
 #!/bin/bash
-python personality_captions/run_pic.py \
+python3 personality_captions/run_pic.py \
 	--model_name_or_path models/base-vg-labels/ep_107_1192087 \
 	--do_train \
 	--do_lower_case \

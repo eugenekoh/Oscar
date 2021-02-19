@@ -1,5 +1,5 @@
 #!/bin/bash
-python personality_captions/run_pic.py \
+python3 personality_captions/run_pic.py \
 	--do_test \
 	--do_eval \
 	--per_gpu_eval_batch_size 2 \
