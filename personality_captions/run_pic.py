@@ -36,7 +36,7 @@ class CaptionTSVDataset(Dataset):
         Args:
             yaml file with all required data (image feature, caption, labels, etc)
             tokenizer: tokenizer for text processing.
-            add_od_labels: whether to add labels from yaml file to BERT. 
+            add_od_labels: whether to add labels from yaml file to BERT.
             max_img_seq_length: max image sequence length.
             max_seq_length: max text sequence length.
             max_seq_a_length: max caption sequence length.
@@ -73,7 +73,6 @@ class CaptionTSVDataset(Dataset):
         self.image_keys = self.prepare_image_keys()
         self.key2index = self.prepare_image_key_to_index()
         self.key2captions = self.prepare_image_key_to_captions()
-        self.personality2index = self.prepare_personality_to_index()
 
     def get_valid_tsv(self):
         # based on the order of file size
@@ -81,13 +80,6 @@ class CaptionTSVDataset(Dataset):
             return self.label_tsv
         if self.feat_tsv:
             return self.feat_tsv
-
-    def prepare_personality_to_index(self):
-        with open(self.personality_file) as f:
-            personalities = list(x.strip() for x in f.readlines())
-            assert len(personalities) == 215
-
-        return {x: i for i, x in enumerate(personalities)}
 
     def prepare_image_keys(self):
         tsv = self.get_valid_tsv()
@@ -128,7 +120,7 @@ class CaptionTSVDataset(Dataset):
 
     def get_personality(self, idx):
         img_cap_pair = self.captions[idx]
-        return self.personality2index[img_cap_pair['personality']]
+        return img_cap_pair['personality']
 
     def get_od_labels(self, img_idx):
         od_labels = None
@@ -162,8 +154,8 @@ class CaptionTSVDataset(Dataset):
 
 
 class CaptionTensorizer(object):
-    def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=70,
-                 max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3,
+    def __init__(self, tokenizer, max_img_seq_length=50, max_seq_length=75,
+                 max_seq_a_length=40, mask_prob=0.15, max_masked_tokens=3, max_seq_c_length=5,
                  is_train=True):
         """Constructor.
         Args:
@@ -182,40 +174,47 @@ class CaptionTensorizer(object):
         self.max_seq_a_len = max_seq_a_length
         self.mask_prob = mask_prob
         self.max_masked_tokens = max_masked_tokens
+        self.max_seq_c_len = max_seq_c_length
         self._triangle_mask = torch.tril(torch.ones((self.max_seq_len,
                                                      self.max_seq_len), dtype=torch.long))
 
-    def tensorize_example(self, text_a, img_feat, text_b=None,
+    def tensorize_example(self, text_a, img_feat, text_b, personality,
                           cls_token_segment_id=0, pad_token_segment_id=0,
                           sequence_a_segment_id=0, sequence_b_segment_id=1,
-                          personality=None):
+                          sequence_c_segment_id=2):
         if self.is_train:
             tokens_a = self.tokenizer.tokenize(text_a)
         else:
             # fake tokens to generate masks
             tokens_a = [self.tokenizer.mask_token] * (self.max_seq_a_len - 2)
-        if len(tokens_a) > self.max_seq_a_len - 2:
+        if len(tokens_a) > self.max_seq_a_len - 2:  # 2 tokens - [CLS] and [SEP]
             tokens_a = tokens_a[:(self.max_seq_a_len - 2)]
 
         tokens = [self.tokenizer.cls_token] + tokens_a + [self.tokenizer.sep_token]
-        segment_ids = [cls_token_segment_id] + [sequence_a_segment_id] * (len(tokens) - 1)
+        segment_ids = [cls_token_segment_id] + [sequence_a_segment_id] * (len(tokens) - 1)  # sep token use same id
         seq_a_len = len(tokens)
-        if text_b:
-            # pad text_a to keep it in fixed length for better inference.
-            padding_a_len = self.max_seq_a_len - seq_a_len
-            tokens += [self.tokenizer.pad_token] * padding_a_len
-            segment_ids += ([pad_token_segment_id] * padding_a_len)
 
-            tokens_b = self.tokenizer.tokenize(text_b)
-            if len(tokens_b) > self.max_seq_len - len(tokens) - 1:
-                tokens_b = tokens_b[: (self.max_seq_len - len(tokens) - 1)]
-            tokens += tokens_b + [self.tokenizer.sep_token]
-            segment_ids += [sequence_b_segment_id] * (len(tokens_b) + 1)
+        # pad text_a to keep it in fixed length for better inference.
+        padding_a_len = self.max_seq_a_len - seq_a_len
+        tokens += [self.tokenizer.pad_token] * padding_a_len
+        segment_ids += ([pad_token_segment_id] * padding_a_len)
+
+        # add personality captions
+        tokens_c = self.tokenizer.tokenize(personality)
+        tokens_c = tokens_c[:(self.max_seq_c_len - 1)]
+        tokens += tokens_c + [self.tokenizer.sep_token]
+        segment_ids += [sequence_c_segment_id] * (len(tokens_c) + 1)
+
+        tokens_b = self.tokenizer.tokenize(text_b)
+        if len(tokens_b) > self.max_seq_len - len(tokens) - 1:  # caption + labels + , 1 for sep token
+            tokens_b = tokens_b[: (self.max_seq_len - len(tokens) - 1)]
+        tokens += tokens_b + [self.tokenizer.sep_token]
+        segment_ids += [sequence_b_segment_id] * (len(tokens_b) + 1)  # sep token use same id
 
         seq_len = len(tokens)
         if self.is_train:
             masked_pos = torch.zeros(self.max_seq_len, dtype=torch.int)
-            # randomly mask words for prediction, ignore [CLS]
+            # randomly mask words for prediction, ignore [CLS], masks [SEP] as well
             candidate_masked_idx = list(range(1, seq_a_len))  # only mask text_a
             random.shuffle(candidate_masked_idx)
             num_masked = min(max(round(self.mask_prob * seq_a_len), 1), self.max_masked_tokens)
@@ -268,16 +267,17 @@ class CaptionTensorizer(object):
         # for caption as caption will have full attention on image. 
         max_len = self.max_seq_len + self.max_img_seq_len
         attention_mask = torch.zeros((max_len, max_len), dtype=torch.long)
-        # C: caption, L: label, R: image region
+        # C: caption, L: label, R: image region, P: personality
         c_start, c_end = 0, seq_a_len
         l_start, l_end = self.max_seq_a_len, seq_len
         r_start, r_end = self.max_seq_len, self.max_seq_len + img_len
         # triangle mask for caption to caption
         attention_mask[c_start: c_end, c_start: c_end].copy_(self._triangle_mask[0: seq_a_len, 0: seq_a_len])
-        # full attention for L-L, R-R
+        # full attention for L-L, R-R, P-P
         attention_mask[l_start: l_end, l_start: l_end] = 1
         attention_mask[r_start: r_end, r_start: r_end] = 1
-        # full attention for C-L, C-R
+        # full attention for C-L, C-R, C-P
+        # TODO : why no L-C , R-C
         attention_mask[c_start: c_end, l_start: l_end] = 1
         attention_mask[c_start: c_end, r_start: r_end] = 1
         # full attention for L-R:
@@ -286,13 +286,12 @@ class CaptionTensorizer(object):
 
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         segment_ids = torch.tensor(segment_ids, dtype=torch.long)
-        personality = torch.tensor(personality, dtype=torch.long)
 
         # add personality index
         if self.is_train:
             masked_ids = torch.tensor(masked_ids, dtype=torch.long)
-            return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, masked_ids, personality)
-        return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, personality)
+            return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, masked_ids)
+        return (input_ids, attention_mask, segment_ids, img_feat, masked_pos)
 
 
 def build_dataset(yaml_file, tokenizer, args, is_train=True):
@@ -393,9 +392,7 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    if args.scst:
-        scst_criterion = ScstRewardCriterion()
-        logger.info("  SCST training...")
+    scst_criterion = ScstRewardCriterion()
 
     global_step, global_loss, global_acc = 0, 0.0, 0.0
     model.zero_grad()
@@ -407,8 +404,7 @@ def train(args, train_dataset, model, tokenizer):
                 model.train()
                 inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
                           'token_type_ids': batch[2], 'img_feats': batch[3],
-                          'masked_pos': batch[4], 'masked_ids': batch[5],
-                          'personality_ids': batch[6],
+                          'masked_pos': batch[4], 'masked_ids': batch[5]
                           }
                 outputs = model(**inputs)
                 loss, logits = outputs[:2]
@@ -448,7 +444,7 @@ def train(args, train_dataset, model, tokenizer):
 
                     score_type = 'SCST_Score' if args.scst else 'MLM_Accuracy'
                     writer.add_scalar(f"Score/{score_type}", batch_acc, tensorboard_step)
-                    writer.add_scalar(f"Accuracy/Global_{score_type}", global_acc / global_step, tensorboard_step)
+                    writer.add_scalar(f"Score/Global_{score_type}", global_acc / global_step, tensorboard_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
@@ -480,7 +476,6 @@ def scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch,
               'input_ids': batch[0], 'attention_mask': batch[1],
               'token_type_ids': batch[2], 'img_feats': batch[3],
               'masked_pos': batch[4],
-              'personality_ids': batch[6],
               'do_sample': False,
               'bos_token_id': cls_token_id,
               'pad_token_id': pad_token_id,
@@ -542,7 +537,6 @@ def validate(args, val_dataloader, model, scst_criterion, tokenizer):
         inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
                   'token_type_ids': batch[2], 'img_feats': batch[3],
                   'masked_pos': batch[4], 'masked_ids': batch[5],
-                  'personality_ids': batch[6],
                   }
         outputs = model(**inputs)
         mlm_loss, logits = outputs[:2]
@@ -672,7 +666,6 @@ def test(args, test_dataset, model, tokenizer, predict_file):
                           'input_ids': batch[0], 'attention_mask': batch[1],
                           'token_type_ids': batch[2], 'img_feats': batch[3],
                           'masked_pos': batch[4],
-                          'personality_ids': batch[5],
                           'do_sample': False,
                           'bos_token_id': cls_token_id,
                           'pad_token_id': pad_token_id,
