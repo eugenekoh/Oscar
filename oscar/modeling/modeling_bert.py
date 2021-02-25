@@ -658,7 +658,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
 
         if input_ids is None:
             input_ids = torch.full(
-                (batch_size, 1), bos_token_id, dtype=torch.long, device=input_ids.device
+                (batch_size, 1), bos_token_id, dtype=torch.long, device=img_feats.device
             )
         else:
             assert input_ids.dim() == 2, "Input prompt should be of shape (batch_size, sequence length)."
