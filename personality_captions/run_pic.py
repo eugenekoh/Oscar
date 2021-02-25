@@ -445,7 +445,7 @@ def train(args, train_dataset, model, tokenizer):
 
                     score_type = 'SCST_Score' if args.scst else 'MLM_Accuracy'
                     writer.add_scalar(f"Score/{score_type}", batch_acc, tensorboard_step)
-                    writer.add_scalar(f"Accuracy/Global_{score_type}", global_acc / global_step, tensorboard_step)
+                    writer.add_scalar(f"Score/Global_{score_type}", global_acc / global_step, tensorboard_step)
 
                 if (args.save_steps > 0 and global_step % args.save_steps == 0) or \
                         global_step == t_total:
