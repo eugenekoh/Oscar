@@ -393,12 +393,10 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    if args.scst:
-        scst_criterion = ScstRewardCriterion()
-        logger.info("  SCST training...")
-
+    scst_criterion = ScstRewardCriterion()
     global_step, global_loss, global_acc = 0, 0.0, 0.0
     model.zero_grad()
+
     for epoch in range(int(args.num_train_epochs)):
         for step, (img_keys, batch) in enumerate(train_dataloader):
             batch = tuple(t.to(args.device) for t in batch)
