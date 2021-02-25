@@ -429,17 +429,30 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
         self.drop_worst_ratio = 0.2
 
         # for decoding
-        self.loss = nn.CrossEntropyLoss(reduction='mean')
-        self.personality_embedding = nn.Embedding(num_personalities, bert_embedding_weight.size(1))
-        self.fc = nn.Linear(bert_embedding_weight.size(1) * 2, bert_embedding_weight.size(1))
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.decoder = nn.Linear(bert_embedding_weight.size(1),
-                                 bert_embedding_weight.size(0), bias=False)
+        self.decode_loss = nn.CrossEntropyLoss(reduction='mean')
+        self.personality_embedding = nn.Embedding(num_personalities, config.hidden_size)
+        self.decoder = nn.Sequential(
+            nn.Linear(config.hidden_size * 2, config.hidden_size * 2),
+            BertLayerNorm(config.hidden_size * 2, eps=config.layer_norm_eps),
+            nn.ReLU(),
+            nn.Dropout(config.hidden_dropout_prob),
+            nn.Linear(config.hidden_size * 2, config.vocab_size),
+        )
+
+        # for classification
+        self.classify_loss = nn.CrossEntropyLoss()
+        self.classifier = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size),
+            BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps),
+            nn.ReLU(),
+            nn.Dropout(config.hidden_dropout_prob),
+            nn.Linear(config.hidden_size, num_personalities),
+        )
+
+    def classify(self, x):
+        return self.classifier(x)
 
     def decode(self, x):
-        x = self.fc(x)
-        x = F.relu(x)
-        x = self.dropout(x)
         return self.decoder(x)
 
     def forward(self, *args, **kwargs):
@@ -471,16 +484,24 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
                 transformed_outputs.append(concat)
 
             concat_personality = torch.cat(transformed_outputs, 0)
-            class_logits = self.decode(concat_personality)
+            vocab_logits = self.decode(concat_personality)
             masked_ids = masked_ids[masked_ids != 0]   # remove padding masks
-            masked_loss = self.loss(class_logits.float(), masked_ids)
-            outputs = (masked_loss, class_logits,) + outputs[2:]
+            masked_loss = self.decode_loss(vocab_logits.float(), masked_ids)
+
+            cls_transformed = self.transform(sequence_output[:, 0 , :])
+            personality_logits = self.classify(cls_transformed)
+            classify_loss = self.classify_loss(personality_logits, personality_ids)
+
+            total_loss = masked_loss + classify_loss
+            outputs = (total_loss, vocab_logits,) + outputs[2:]
+
         else:
             transformed_outputs = self.transform(sequence_output)
             personality_repeat = personality_tensor.unsqueeze(1).repeat(1, masked_pos.shape[-1], 1)
             concat_personality = torch.cat((transformed_outputs, personality_repeat), -1)
             class_logits = self.decode(concat_personality)
             outputs = (class_logits,) + outputs[2:]
+
         return outputs
 
     def prepare_inputs_for_generation(self, curr_ids, past=None):
