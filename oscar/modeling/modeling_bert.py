@@ -225,7 +225,7 @@ class BertImgModel(BertPreTrainedModel):
         # positions we want to attend and -10000.0 for masked positions.
         # Since we are adding it to the raw scores before the softmax, this is
         # effectively the same as removing these entirely.
-        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
+        extended_attention_mask = extended_attention_mask.to(dtype=input_ids.dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
         # Prepare head mask if needed
@@ -242,7 +242,7 @@ class BertImgModel(BertPreTrainedModel):
                     -1)  # We can specify head_mask for each layer
             # switch to float if needed + fp16 compatibility
             head_mask = head_mask.to(
-                dtype=next(self.parameters()).dtype)  # switch to fload if need + fp16 compatibility
+                dtype=input_ids.dtype)  # switch to fload if need + fp16 compatibility
         else:
             head_mask = [None] * self.config.num_hidden_layers
 
@@ -647,7 +647,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
 
         if input_ids is None:
             input_ids = torch.full(
-                (batch_size, 1), bos_token_id, dtype=torch.long, device=next(self.parameters()).device
+                (batch_size, 1), bos_token_id, dtype=torch.long, device=img_feats.device
             )
         else:
             assert input_ids.dim() == 2, "Input prompt should be of shape (batch_size, sequence length)."
