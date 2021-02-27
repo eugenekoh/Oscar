@@ -451,7 +451,6 @@ def train(args, train_dataset, model, tokenizer):
                     _ = save_checkpoint(model, tokenizer, args, epoch, tensorboard_step)
                     # evaluation
                     if args.evaluate_during_training:
-                        logger.info("Perform validation at step: %d" % tensorboard_step)
 
                         # Get MTL Validation
                         metrics = validate(args, val_dataloader, model, scst_criterion, tokenizer)
@@ -459,10 +458,13 @@ def train(args, train_dataset, model, tokenizer):
                         # update tensorboard
                         writer.add_scalar("Loss/Val_MLM_Loss", metrics['val_mlm_loss'], tensorboard_step)
                         writer.add_scalar("Score/Val_MLM_Accuracy", metrics['val_mlm_acc'], tensorboard_step)
+                        logger.info(f"Val MLM Loss:{metrics['val_mlm_loss']}, Val MLM Accuracy:{metrics['val_mlm_acc']}")
 
                         if args.scst:
                             writer.add_scalar("Loss/Val_SCST_Loss", metrics['val_scst_loss'], tensorboard_step)
                             writer.add_scalar("Score/Val_SCST_Score", metrics['val_scst_acc'], tensorboard_step)
+                            logger.info(f"Val SCST Loss:{metrics['val_scst_loss']}, Val SCST Accuracy:{metrics['val_scst_acc']}")
+
 
     return global_step, global_loss / global_step
 
@@ -552,9 +554,7 @@ def validate(args, val_dataloader, model, scst_criterion, tokenizer):
 
         if args.scst:
             scst_loss = scst_train_iter(args, val_dataloader.dataset, model, scst_criterion, img_keys, batch, tokenizer)
-            scst_loss = scst_loss.item()
             scst_score = scst_criterion.get_score()
-            scst_loss = scst_loss.item()
             scst_global_loss += scst_loss
             scst_global_score += scst_score
 
