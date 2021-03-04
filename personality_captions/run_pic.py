@@ -28,7 +28,7 @@ from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule, Warmu
 from transformers.pytorch_transformers import BertTokenizer, BertConfig
 
 
-class CaptionTSVDataset(Dataset):
+class PersonalityCaptionTSVDataset(Dataset):
     def __init__(self, yaml_file, tokenizer=None, add_od_labels=True,
                  max_img_seq_length=50, max_seq_length=70, max_seq_a_length=40,
                  is_train=True, mask_prob=0.15, max_masked_tokens=3, **kwargs):
@@ -51,7 +51,6 @@ class CaptionTSVDataset(Dataset):
         self.label_file = find_file_path_in_yaml(self.cfg['label'], self.root)
         self.feat_file = find_file_path_in_yaml(self.cfg['feature'], self.root)
         self.caption_file = find_file_path_in_yaml(self.cfg.get('caption'), self.root)
-        self.personality_file = find_file_path_in_yaml(self.cfg.get('personality'), self.root)
 
         assert op.isfile(self.feat_file)
         if add_od_labels: assert op.isfile(self.label_file)
@@ -151,6 +150,63 @@ class CaptionTSVDataset(Dataset):
         if self.is_train:
             return len(self.captions)
         return self.get_valid_tsv().num_rows()
+
+
+class CocoCaptionTSVDataset(PersonalityCaptionTSVDataset):
+    def __init__(self, yaml_file, tokenizer=None, add_od_labels=True,
+                 max_img_seq_length=50, max_seq_length=70, max_seq_a_length=40,
+                 is_train=True, mask_prob=0.15, max_masked_tokens=3, **kwargs):
+        super().__init__(yaml_file, tokenizer, add_od_labels, max_img_seq_length, max_seq_length,
+                         max_seq_a_length, is_train, mask_prob, max_masked_tokens, *kwargs)
+
+    def prepare_image_key_to_captions(self):
+        if self.is_train:
+            key2captions = {key: [] for key in self.image_keys}
+            for cap in self.captions:
+                key2captions[cap['image_id']].append(cap['caption'])
+            return key2captions
+
+    def get_image_index(self, idx):
+        img_cap_pair = self.captions[idx]
+        img_key = img_cap_pair['image_id']
+        return self.key2index[img_key]
+
+    def get_caption(self, idx):
+        if self.is_train:
+            img_cap_pair = self.captions[idx]
+            return img_cap_pair['caption']
+        return ""
+
+    def get_personality(self, idx):
+        return "Descriptive"
+
+
+class CaptionTSVDataset(Dataset):
+    def __init__(self, personality_yaml_file, coco_yaml_file, tokenizer=None, add_od_labels=True,
+                 max_img_seq_length=50, max_seq_length=70, max_seq_a_length=40,
+                 is_train=True, mask_prob=0.15, max_masked_tokens=3, **kwargs):
+        self.is_train = is_train
+        self.personality_dataset = PersonalityCaptionTSVDataset(personality_yaml_file, tokenizer, add_od_labels,
+                                                                max_img_seq_length, max_seq_length, max_seq_a_length,
+                                                                is_train, mask_prob, max_masked_tokens, *kwargs)
+
+        self.coco_dataset = CocoCaptionTSVDataset(coco_yaml_file, tokenizer, add_od_labels,
+                                                  max_img_seq_length, max_seq_length, max_seq_a_length,
+                                                  is_train, mask_prob, max_masked_tokens, *kwargs)
+
+    def get_captions_by_key(self, key):
+        assert self.is_train, "cannot get captions for inference"
+        key2captions = self.coco_dataset.key2captions if key in self.coco_dataset.key2captions else self.personality_dataset.key2captions
+        return key2captions[key]
+
+    def __getitem__(self, idx):
+        if idx < len(self.personality_dataset):
+            return self.personality_dataset[idx]
+
+        return self.coco_dataset[idx - len(self.coco_dataset)]
+
+    def __len__(self):
+        return self.personality_dataset.get_valid_tsv().num_rows() + self.coco_dataset.get_valid_tsv().num_rows()
 
 
 class CaptionTensorizer(object):
@@ -290,23 +346,24 @@ class CaptionTensorizer(object):
         # add personality index
         if self.is_train:
             masked_ids = torch.tensor(masked_ids, dtype=torch.long)
-            return (input_ids, attention_mask, segment_ids, img_feat, masked_pos, masked_ids)
-        return (input_ids, attention_mask, segment_ids, img_feat, masked_pos)
+            return input_ids, attention_mask, segment_ids, img_feat, masked_pos, masked_ids
+        return input_ids, attention_mask, segment_ids, img_feat, masked_pos
 
 
 def build_dataset(yaml_file, tokenizer, args, is_train=True):
-    if not op.isfile(yaml_file):
-        yaml_file = op.join(args.data_dir, yaml_file)
-        assert op.isfile(yaml_file)
+    personality_yaml = op.join(args.personality_data_dir, yaml_file)
+    assert op.isfile(personality_yaml)
+    coco_yaml = op.join(args.coco_data_dir, yaml_file)
+    assert op.isfile(coco_yaml)
 
     if is_train:
-        return CaptionTSVDataset(yaml_file, tokenizer=tokenizer,
+        return CaptionTSVDataset(personality_yaml, coco_yaml, tokenizer=tokenizer,
                                  add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
                                  max_seq_length=args.max_seq_length, max_seq_a_length=args.max_seq_a_length,
                                  is_train=True, mask_prob=args.mask_prob, max_masked_tokens=args.max_masked_tokens)
 
     dataset_class = CaptionTSVDataset
-    return dataset_class(yaml_file, tokenizer=tokenizer,
+    return dataset_class(personality_yaml, coco_yaml, tokenizer=tokenizer,
                          add_od_labels=args.add_od_labels, max_img_seq_length=args.max_img_seq_length,
                          max_seq_length=args.max_seq_length, max_seq_a_length=args.max_gen_length,
                          is_train=False)
@@ -346,11 +403,16 @@ def train(args, train_dataset, model, tokenizer):
                                   batch_size=args.train_batch_size, num_workers=args.num_workers)
 
     args.val_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-    val_dataset = build_dataset(op.join(args.data_dir, args.val_yaml), tokenizer, args,
+    val_dataset = build_dataset(args.val_yaml, tokenizer, args,
                                 is_train=True)
-    val_sampler = SequentialSampler(val_dataset)
-    val_dataloader = DataLoader(val_dataset, sampler=val_sampler,
-                                batch_size=args.val_batch_size, num_workers=args.num_workers)
+
+    coco_val_sampler = SequentialSampler(val_dataset.coco_dataset)
+    coco_val_dataloader = DataLoader(val_dataset.coco_dataset, sampler=coco_val_sampler,
+                                     batch_size=args.val_batch_size, num_workers=args.num_workers)
+
+    personality_val_sampler = SequentialSampler(val_dataset.personality_dataset)
+    personality_val_dataloader = DataLoader(val_dataset.personality_dataset, sampler=personality_val_sampler,
+                                            batch_size=args.val_batch_size, num_workers=args.num_workers)
 
     writer = SummaryWriter(logdir=args.tensorboard_log_dir)
 
@@ -453,18 +515,25 @@ def train(args, train_dataset, model, tokenizer):
                     if args.evaluate_during_training:
 
                         # Get MTL Validation
-                        metrics = validate(args, val_dataloader, model, scst_criterion, tokenizer)
+                        coco_metrics = validate(args, coco_val_dataloader, model, scst_criterion, tokenizer)
+                        personality_metrics = validate(args, personality_val_dataloader, model, scst_criterion,
+                                                       tokenizer)
 
                         # update tensorboard
-                        writer.add_scalar("Loss/Val_MLM_Loss", metrics['val_mlm_loss'], tensorboard_step)
-                        writer.add_scalar("Score/Val_MLM_Accuracy", metrics['val_mlm_acc'], tensorboard_step)
-                        logger.info(f"Val MLM Loss:{metrics['val_mlm_loss']}, Val MLM Accuracy:{metrics['val_mlm_acc']}")
+                        for label, metrics in [("COCO", coco_metrics), ("Personality", personality_metrics)]:
+                            writer.add_scalar(f"Loss/{label}_Val_MLM_Loss", metrics['val_mlm_loss'], tensorboard_step)
+                            writer.add_scalar(f"Score/{label}_Val_MLM_Accuracy", metrics['val_mlm_acc'],
+                                              tensorboard_step)
+                            logger.info(
+                                f"{label} - Val MLM Loss:{metrics['val_mlm_loss']}, Val MLM Accuracy:{metrics['val_mlm_acc']}")
 
-                        if args.scst:
-                            writer.add_scalar("Loss/Val_SCST_Loss", metrics['val_scst_loss'], tensorboard_step)
-                            writer.add_scalar("Score/Val_SCST_Score", metrics['val_scst_acc'], tensorboard_step)
-                            logger.info(f"Val SCST Loss:{metrics['val_scst_loss']}, Val SCST Accuracy:{metrics['val_scst_acc']}")
-
+                            if args.scst:
+                                writer.add_scalar(f"Loss/{label}_Val_SCST_Loss", metrics['val_scst_loss'],
+                                                  tensorboard_step)
+                                writer.add_scalar(f"Score/{label}_Val_SCST_Score", metrics['val_scst_acc'],
+                                                  tensorboard_step)
+                                logger.info(
+                                    f"{label} - Val SCST Loss:{metrics['val_scst_loss']}, Val SCST Accuracy:{metrics['val_scst_acc']}")
 
     return global_step, global_loss / global_step
 
@@ -735,7 +804,9 @@ def restore_training_settings(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", default='datasets/coco_caption', type=str, required=False,
+    parser.add_argument("--coco_data_dir", default='datasets/coco_caption', type=str, required=False,
+                        help="The input data dir with all required files.")
+    parser.add_argument("--personality_data_dir", default='datasets/personality_captions', type=str, required=False,
                         help="The input data dir with all required files.")
     parser.add_argument("--train_yaml", default='train.yaml', type=str, required=False,
                         help="yaml file for training.")
@@ -877,15 +948,14 @@ def main():
     model.to(args.device)
     logger.info("Training/evaluation parameters %s", args)
     if args.do_train:
-        train_dataset = build_dataset(op.join(args.data_dir, args.train_yaml), tokenizer, args)
+        train_dataset = build_dataset(args.train_yaml, tokenizer, args)
         global_step, avg_loss = train(args, train_dataset, model, tokenizer)
         logger.info("Training done: total_step = %s, avg loss = %s", global_step, avg_loss)
 
     # inference and evaluation
     if args.do_test or args.do_eval:
         args = restore_training_settings(args)
-        test_dataset = build_dataset(op.join(args.data_dir, args.test_yaml),
-                                     tokenizer, args, is_train=False)
+        test_dataset = build_dataset(args.test_yaml, tokenizer, args, is_train=False)
         if args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
