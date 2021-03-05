@@ -98,9 +98,11 @@ class PersonalityCaptionTSVDataset(Dataset):
             return key2captions
 
     def get_image_index(self, idx):
-        img_cap_pair = self.captions[idx]
-        img_key = img_cap_pair['image_hash']
-        return self.key2index[img_key]
+        if self.is_train:
+            img_cap_pair = self.captions[idx]
+            img_key = img_cap_pair['image_hash']
+            return self.key2index[img_key]
+        return idx
 
     def get_image_key(self, idx):
         img_idx = self.get_image_index(idx)
@@ -169,9 +171,11 @@ class CocoCaptionTSVDataset(PersonalityCaptionTSVDataset):
             return key2captions
 
     def get_image_index(self, idx):
-        img_cap_pair = self.captions[idx]
-        img_key = img_cap_pair['image_id']
-        return self.key2index[img_key]
+        if self.is_train:
+            img_cap_pair = self.captions[idx]
+            img_key = img_cap_pair['image_id']
+            return self.key2index[img_key]
+        return idx
 
     def get_caption(self, idx):
         if self.is_train:
