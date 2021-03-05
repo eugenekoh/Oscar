@@ -508,9 +508,6 @@ def train(args, train_dataset, model, tokenizer):
             outputs = model(**inputs)
             loss, logits = outputs[:2]
 
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             masked_ids = inputs['masked_ids']
             masked_ids = masked_ids[masked_ids != 0]
             batch_score = compute_score_with_logits(logits, masked_ids)
@@ -521,8 +518,9 @@ def train(args, train_dataset, model, tokenizer):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
-            scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             global_loss += loss.item()
             global_acc += batch_acc
             if (step + 1) % args.gradient_accumulation_steps == 0:
