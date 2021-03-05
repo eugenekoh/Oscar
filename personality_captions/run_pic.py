@@ -12,8 +12,10 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
+import torch_optimizer as optim
 from tensorboardX import SummaryWriter
+from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
+from lr_finder import LRFinder, TrainDataLoaderIter, ValDataLoaderIter
 from tqdm import tqdm
 
 from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
@@ -24,8 +26,8 @@ from oscar.utils.misc import (mkdir, set_seed,
                               load_from_yaml_file, find_file_path_in_yaml)
 from oscar.utils.tsv_file import TSVFile
 from oscar.utils.tsv_file_ops import tsv_writer
-from transformers.pytorch_transformers import AdamW, WarmupLinearSchedule, WarmupConstantSchedule
 from transformers.pytorch_transformers import BertTokenizer, BertConfig
+from transformers.pytorch_transformers import WarmupLinearSchedule, WarmupConstantSchedule
 
 
 class PersonalityCaptionTSVDataset(Dataset):
@@ -395,6 +397,30 @@ def compute_score_with_logits(logits, labels):
     return scores
 
 
+def find_lr(model, optimizer, train_dataloader, val_dataloader, fig_name='lr_loss.png'):
+    class CustomTrainIter(TrainDataLoaderIter):
+        def inputs_labels_from_batch(self, batch_data):
+            batch = batch_data[1]
+            inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
+                      'token_type_ids': batch[2], 'img_feats': batch[3],
+                      'masked_pos': batch[4], 'masked_ids': batch[5]
+                      }
+            return inputs, None
+
+    class CustomValIter(ValDataLoaderIter):
+        def inputs_labels_from_batch(self, batch_data):
+            batch = batch_data[1]
+            inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
+                      'token_type_ids': batch[2], 'img_feats': batch[3],
+                      'masked_pos': batch[4], 'masked_ids': batch[5]
+                      }
+            return inputs, None
+
+    lr_finder = LRFinder(model, optimizer)
+    lr_finder.range_test(CustomTrainIter(train_dataloader), val_loader=CustomValIter(val_dataloader) , end_lr=10, num_iter=100, step_mode="linear")
+    lr_finder.plot(fname=fig_name)  # to inspect the loss-learning rate graph
+    exit()
+
 def train(args, train_dataset, model, tokenizer):
     # setup datasets
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
@@ -425,14 +451,20 @@ def train(args, train_dataset, model, tokenizer):
                   * args.num_train_epochs
 
     # Prepare optimizer and scheduler
-    no_decay = ['bias', 'LayerNorm.weight']
-    grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not \
-            any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if \
-                    any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
-    optimizer = AdamW(grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+    optimizer = optim.Adahessian(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.adam_epsilon,
+    )
+
+    # learning rate finder
+    if args.find_lr:
+        assert not args.scst
+        val_sampler = SequentialSampler(val_dataset)
+        val_dataloader = DataLoader(val_dataset, sampler=val_sampler, batch_size=args.val_batch_size, num_workers=args.num_workers)
+        find_lr(model, optimizer, train_dataloader, val_dataloader)
+
+
     if args.scheduler == "constant":
         scheduler = WarmupConstantSchedule(
             optimizer, warmup_steps=args.warmup_steps)
@@ -483,7 +515,7 @@ def train(args, train_dataset, model, tokenizer):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
-            loss.backward()
+            loss.backward(create_graph=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             global_loss += loss.item()
             global_acc += batch_acc
@@ -877,6 +909,7 @@ def main():
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
     parser.add_argument('--scst', action='store_true', help='Self-critical sequence training')
+    parser.add_argument('--find_lr', action='store_true', help='Find optimal learning rate')
 
     # for tensorboard
     parser.add_argument('--global_step_offset', type=int, default=0, help="global step offset for logging to directory")
@@ -961,13 +994,16 @@ def main():
 
         if not args.do_eval:
             # generate captions only
-            predict_file = get_predict_file(checkpoint, test_dataset.yaml_file, args)
-            test(args, test_dataset, model, tokenizer, predict_file)
+            predict_file = get_predict_file(checkpoint, test_dataset.personality_dataset.yaml_file, args)
+            test(args, test_dataset.personality_dataset, model, tokenizer, predict_file)
+
+            predict_file = get_predict_file(checkpoint, test_dataset.coco_datasetyaml_file, args)
+            test(args, test_dataset.coco_dataset, model, tokenizer, predict_file)
             logger.info("Prediction results saved to: {}".format(predict_file))
         else:
             # add evaluation
-            evaluate_file = evaluate(args, test_dataset, model, tokenizer,
-                                     checkpoint)
+            evaluate_file = evaluate(args, test_dataset.personality_dataset, model, tokenizer, checkpoint)
+            evaluate_file = evaluate(args, test_dataset.coco_dataset, model, tokenizer, checkpoint)
             logger.info("Evaluation results saved to: {}".format(evaluate_file))
 
 
