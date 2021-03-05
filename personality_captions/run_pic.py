@@ -466,15 +466,6 @@ def train(args, train_dataset, model, tokenizer):
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
-    if args.scheduler == "constant":
-        scheduler = WarmupConstantSchedule(
-            optimizer, warmup_steps=args.warmup_steps)
-    elif args.scheduler == "linear":
-        scheduler = WarmupLinearSchedule(
-            optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
-    else:
-        raise ValueError("Unknown scheduler type: {}".format(args.scheduler))
-
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
@@ -484,6 +475,15 @@ def train(args, train_dataset, model, tokenizer):
         val_dataloader = DataLoader(val_dataset, sampler=val_sampler, batch_size=args.val_batch_size,
                                     num_workers=args.num_workers)
         find_lr(model, optimizer, train_dataloader, val_dataloader)
+
+    if args.scheduler == "constant":
+        scheduler = WarmupConstantSchedule(
+            optimizer, warmup_steps=args.warmup_steps)
+    elif args.scheduler == "linear":
+        scheduler = WarmupLinearSchedule(
+            optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
+    else:
+        raise ValueError("Unknown scheduler type: {}".format(args.scheduler))
 
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
