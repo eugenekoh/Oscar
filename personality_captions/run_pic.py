@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch_optimizer as optim
 from tensorboardX import SummaryWriter
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
@@ -466,13 +467,6 @@ def train(args, train_dataset, model, tokenizer):
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
-    # learning rate finder
-    if args.find_lr:
-        val_sampler = SequentialSampler(val_dataset)
-        val_dataloader = DataLoader(val_dataset, sampler=val_sampler, batch_size=args.val_batch_size,
-                                    num_workers=args.num_workers)
-        find_lr(model, optimizer, train_dataloader, val_dataloader)
-
     if args.scheduler == "constant":
         scheduler = WarmupConstantSchedule(
             optimizer, warmup_steps=args.warmup_steps)
@@ -481,6 +475,8 @@ def train(args, train_dataset, model, tokenizer):
             optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
     else:
         raise ValueError("Unknown scheduler type: {}".format(args.scheduler))
+
+    scaler = GradScaler()
 
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -501,8 +497,10 @@ def train(args, train_dataset, model, tokenizer):
                       'token_type_ids': batch[2], 'img_feats': batch[3],
                       'masked_pos': batch[4], 'masked_ids': batch[5]
                       }
-            outputs = model(**inputs)
-            loss, logits = outputs[:2]
+
+            with autocast():
+                outputs = model(**inputs)
+                loss, logits = outputs[:2]
 
             masked_ids = inputs['masked_ids']
             masked_ids = masked_ids[masked_ids != 0]
@@ -514,15 +512,16 @@ def train(args, train_dataset, model, tokenizer):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
-            loss.backward(create_graph=True)
+            scaler.scale(loss).backward(create_graph=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             global_loss += loss.item()
             global_acc += batch_acc
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 global_step += 1
-                optimizer.step()
+                scaler.step(optimizer)
                 scheduler.step()
                 model.zero_grad()
+                scaler.update()
 
                 tensorboard_step = global_step + args.global_step_offset
                 if global_step % args.logging_steps == 0:
