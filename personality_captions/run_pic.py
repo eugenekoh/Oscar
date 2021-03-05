@@ -667,10 +667,10 @@ def validate(args, val_dataloader, model, scst_criterion, tokenizer):
     }
 
 
-def get_predict_file(output_dir, yaml_file, args):
+def get_predict_file(data_dir, output_dir, yaml_file, args):
     cc = ['pred']
     # make sure it works with/without / in end of the path.
-    data = op.basename(op.join(args.data_dir, '')[:-1])
+    data = op.basename(op.join(data_dir, '')[:-1])
     split = op.basename(yaml_file)
     assert split.endswith('.yaml')
     split = split[:-5]
@@ -994,10 +994,10 @@ def main():
 
         if not args.do_eval:
             # generate captions only
-            predict_file = get_predict_file(checkpoint, test_dataset.personality_dataset.yaml_file, args)
+            predict_file = get_predict_file(args.personality_data_dir, checkpoint, test_dataset.personality_dataset.yaml_file, args)
             test(args, test_dataset.personality_dataset, model, tokenizer, predict_file)
 
-            predict_file = get_predict_file(checkpoint, test_dataset.coco_datasetyaml_file, args)
+            predict_file = get_predict_file(args.coco_data_dir, checkpoint, test_dataset.coco_datasetyaml_file, args)
             test(args, test_dataset.coco_dataset, model, tokenizer, predict_file)
             logger.info("Prediction results saved to: {}".format(predict_file))
         else:
