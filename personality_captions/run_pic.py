@@ -700,9 +700,9 @@ def get_evaluate_method(predict_file):
         return 'coco'
 
 
-def evaluate(args, val_dataset, model, tokenizer, output_dir):
+def evaluate(args, data_dir, val_dataset, model, tokenizer, output_dir):
     assert op.isdir(output_dir)
-    predict_file = get_predict_file(output_dir, val_dataset.yaml_file, args)
+    predict_file = get_predict_file(data_dir, output_dir, val_dataset.yaml_file, args)
     if op.isfile(predict_file):
         logger.info('Skip predict. {} already exists'.format(predict_file))
     else:
@@ -1002,8 +1002,8 @@ def main():
             logger.info("Prediction results saved to: {}".format(predict_file))
         else:
             # add evaluation
-            evaluate_file = evaluate(args, test_dataset.personality_dataset, model, tokenizer, checkpoint)
-            evaluate_file = evaluate(args, test_dataset.coco_dataset, model, tokenizer, checkpoint)
+            evaluate_file = evaluate(args, args.personality_data_dir, test_dataset.personality_dataset, model, tokenizer, checkpoint)
+            evaluate_file = evaluate(args, args.coco_data_dir, test_dataset.coco_dataset, model, tokenizer, checkpoint)
             logger.info("Evaluation results saved to: {}".format(evaluate_file))
 
 
