@@ -463,13 +463,6 @@ def train(args, train_dataset, model, tokenizer):
         weight_decay=args.adam_epsilon,
     )
 
-    if args.fp16:
-        try:
-            from apex import amp
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
-
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
@@ -510,14 +503,6 @@ def train(args, train_dataset, model, tokenizer):
                       }
             outputs = model(**inputs)
             loss, logits = outputs[:2]
-
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward(create_graph=True)
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-            else:
-                loss.backward(create_graph=True)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             masked_ids = inputs['masked_ids']
             masked_ids = masked_ids[masked_ids != 0]
@@ -848,11 +833,6 @@ def main():
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
     parser.add_argument('--find_lr', action='store_true', help='Find optimal learning rate')
-    parser.add_argument('--fp16', action='store_true', help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
-    parser.add_argument('--fp16_opt_level', type=str, default='O1',
-                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                             "See details at https://nvidia.github.io/apex/amp.html")
-
     # for tensorboard
     parser.add_argument('--global_step_offset', type=int, default=0, help="global step offset for logging to directory")
     parser.add_argument('--tensorboard_log_dir', type=str, default='runs/pic', help="directory to store runs info")
