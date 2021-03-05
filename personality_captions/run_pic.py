@@ -15,12 +15,12 @@ import torch
 import torch_optimizer as optim
 from tensorboardX import SummaryWriter
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
-from lr_finder import LRFinder, TrainDataLoaderIter, ValDataLoaderIter
 from tqdm import tqdm
 
+from lr_finder import LRFinder, TrainDataLoaderIter, ValDataLoaderIter
 from oscar.modeling.modeling_bert import BertForPersonalityImageCaptioning
 from oscar.utils.caption_evaluate import (evaluate_on_coco_caption,
-                                          evaluate_on_nocaps, ScstRewardCriterion)
+                                          evaluate_on_nocaps)
 from oscar.utils.logger import setup_logger
 from oscar.utils.misc import (mkdir, set_seed,
                               load_from_yaml_file, find_file_path_in_yaml)
@@ -417,9 +417,11 @@ def find_lr(model, optimizer, train_dataloader, val_dataloader, fig_name='lr_los
             return inputs, None
 
     lr_finder = LRFinder(model, optimizer)
-    lr_finder.range_test(CustomTrainIter(train_dataloader), val_loader=CustomValIter(val_dataloader) , end_lr=10, num_iter=100, step_mode="linear")
+    lr_finder.range_test(CustomTrainIter(train_dataloader), val_loader=CustomValIter(val_dataloader), end_lr=0.1,
+                         num_iter=100, step_mode="linear")
     lr_finder.plot(fname=fig_name)  # to inspect the loss-learning rate graph
     exit()
+
 
 def train(args, train_dataset, model, tokenizer):
     # setup datasets
@@ -457,13 +459,12 @@ def train(args, train_dataset, model, tokenizer):
         weight_decay=args.adam_epsilon,
     )
 
-    # learning rate finder
-    if args.find_lr:
-        assert not args.scst
-        val_sampler = SequentialSampler(val_dataset)
-        val_dataloader = DataLoader(val_dataset, sampler=val_sampler, batch_size=args.val_batch_size, num_workers=args.num_workers)
-        find_lr(model, optimizer, train_dataloader, val_dataloader)
-
+    if args.fp16:
+        try:
+            from apex import amp
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
     if args.scheduler == "constant":
         scheduler = WarmupConstantSchedule(
@@ -477,6 +478,13 @@ def train(args, train_dataset, model, tokenizer):
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
+    # learning rate finder
+    if args.find_lr:
+        val_sampler = SequentialSampler(val_dataset)
+        val_dataloader = DataLoader(val_dataset, sampler=val_sampler, batch_size=args.val_batch_size,
+                                    num_workers=args.num_workers)
+        find_lr(model, optimizer, train_dataloader, val_dataloader)
+
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Num Epochs = %d", args.num_train_epochs)
@@ -486,29 +494,31 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    scst_criterion = ScstRewardCriterion()
-
     global_step, global_loss, global_acc = 0, 0.0, 0.0
     model.zero_grad()
     for epoch in range(int(args.num_train_epochs)):
         for step, (img_keys, batch) in enumerate(train_dataloader):
             batch = tuple(t.to(args.device) for t in batch)
+            model.train()
+            inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
+                      'token_type_ids': batch[2], 'img_feats': batch[3],
+                      'masked_pos': batch[4], 'masked_ids': batch[5]
+                      }
+            outputs = model(**inputs)
+            loss, logits = outputs[:2]
 
-            if not args.scst:
-                model.train()
-                inputs = {'input_ids': batch[0], 'attention_mask': batch[1],
-                          'token_type_ids': batch[2], 'img_feats': batch[3],
-                          'masked_pos': batch[4], 'masked_ids': batch[5]
-                          }
-                outputs = model(**inputs)
-                loss, logits = outputs[:2]
-                masked_ids = inputs['masked_ids']
-                masked_ids = masked_ids[masked_ids != 0]
-                batch_score = compute_score_with_logits(logits, masked_ids)
-                batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
+            if args.fp16:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward(create_graph=True)
+                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             else:
-                loss = scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch, tokenizer)
-                batch_acc = scst_criterion.get_score()
+                loss.backward(create_graph=True)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+
+            masked_ids = inputs['masked_ids']
+            masked_ids = masked_ids[masked_ids != 0]
+            batch_score = compute_score_with_logits(logits, masked_ids)
+            batch_acc = torch.sum(batch_score.float()) / torch.sum(inputs['masked_pos'])
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -536,7 +546,7 @@ def train(args, train_dataset, model, tokenizer):
                     writer.add_scalar("Loss/Loss", loss, tensorboard_step)
                     writer.add_scalar("Loss/Global_Loss", global_loss / global_step, tensorboard_step)
 
-                    score_type = 'SCST_Score' if args.scst else 'MLM_Accuracy'
+                    score_type = 'MLM_Accuracy'
                     writer.add_scalar(f"Score/{score_type}", batch_acc, tensorboard_step)
                     writer.add_scalar(f"Score/Global_{score_type}", global_acc / global_step, tensorboard_step)
 
@@ -547,9 +557,8 @@ def train(args, train_dataset, model, tokenizer):
                     if args.evaluate_during_training:
 
                         # Get MTL Validation
-                        coco_metrics = validate(args, coco_val_dataloader, model, scst_criterion, tokenizer)
-                        personality_metrics = validate(args, personality_val_dataloader, model, scst_criterion,
-                                                       tokenizer)
+                        coco_metrics = validate(args, coco_val_dataloader, model)
+                        personality_metrics = validate(args, personality_val_dataloader, model)
 
                         # update tensorboard
                         for label, metrics in [("COCO", coco_metrics), ("Personality", personality_metrics)]:
@@ -559,77 +568,11 @@ def train(args, train_dataset, model, tokenizer):
                             logger.info(
                                 f"{label} - Val MLM Loss:{metrics['val_mlm_loss']}, Val MLM Accuracy:{metrics['val_mlm_acc']}")
 
-                            if args.scst:
-                                writer.add_scalar(f"Loss/{label}_Val_SCST_Loss", metrics['val_scst_loss'],
-                                                  tensorboard_step)
-                                writer.add_scalar(f"Score/{label}_Val_SCST_Score", metrics['val_scst_acc'],
-                                                  tensorboard_step)
-                                logger.info(
-                                    f"{label} - Val SCST Loss:{metrics['val_scst_loss']}, Val SCST Accuracy:{metrics['val_scst_acc']}")
-
     return global_step, global_loss / global_step
 
 
-def scst_train_iter(args, train_dataset, model, scst_criterion, img_keys, batch, tokenizer):
-    cls_token_id, sep_token_id, pad_token_id, mask_token_id = tokenizer.convert_tokens_to_ids(
-        [tokenizer.cls_token, tokenizer.sep_token, tokenizer.pad_token,
-         tokenizer.mask_token]
-    )
-    inputs = {'is_decode': True,
-              'input_ids': batch[0], 'attention_mask': batch[1],
-              'token_type_ids': batch[2], 'img_feats': batch[3],
-              'masked_pos': batch[4],
-              'do_sample': False,
-              'bos_token_id': cls_token_id,
-              'pad_token_id': pad_token_id,
-              'eos_token_ids': [sep_token_id, pad_token_id],
-              'mask_token_id': mask_token_id,
-              # for adding od labels
-              'add_od_labels': args.add_od_labels, 'od_labels_start_posid': args.max_seq_a_length,
-
-              # hyperparameters of beam search
-              'max_length': args.max_seq_a_length,
-              'num_beams': 1,
-              "temperature": args.temperature,
-              "top_k": args.top_k,
-              "top_p": args.top_p,
-              "repetition_penalty": args.repetition_penalty,
-              "length_penalty": args.length_penalty,
-              "num_return_sequences": 1,
-              "num_keep_best": 1,
-              }
-
-    model.eval()
-    with torch.no_grad():
-        greedy_res_raw, _ = model(**inputs)
-        greedy_res_raw.squeeze_(1)  # batch_size * max_len
-
-    model.train()  # TODO: why activate train here
-    inputs['do_sample'] = True
-    sample_res_raw, sample_logprobs = model(**inputs)
-    sample_res_raw.squeeze_(1)
-    sample_logprobs.squeeze_(1)
-    assert sample_logprobs.requires_grad == True
-    assert sample_res_raw.requires_grad == False
-
-    def _ids_to_captions(all_ids):
-        captions = []
-        for ids in all_ids:
-            c = tokenizer.decode(ids.tolist(), skip_special_tokens=True)
-            captions.append(c)
-        return captions
-
-    greedy_res = _ids_to_captions(greedy_res_raw)
-    sample_res = _ids_to_captions(sample_res_raw)
-    gt_res = [train_dataset.get_captions_by_key(k) for k in img_keys]
-
-    loss = scst_criterion(gt_res, greedy_res, sample_res, sample_logprobs)
-    return loss
-
-
-def validate(args, val_dataloader, model, scst_criterion, tokenizer):
+def validate(args, val_dataloader, model):
     mlm_global_loss = mlm_global_acc = 0
-    scst_global_loss = scst_global_score = 0
     global_step = 0
     for step, (img_keys, batch) in enumerate(tqdm(val_dataloader)):
         global_step += 1
@@ -653,17 +596,9 @@ def validate(args, val_dataloader, model, scst_criterion, tokenizer):
         mlm_global_loss += mlm_loss
         mlm_global_acc += mlm_acc
 
-        if args.scst:
-            scst_loss = scst_train_iter(args, val_dataloader.dataset, model, scst_criterion, img_keys, batch, tokenizer)
-            scst_score = scst_criterion.get_score()
-            scst_global_loss += scst_loss
-            scst_global_score += scst_score
-
     return {
         'val_mlm_loss': mlm_global_loss / global_step,
         'val_mlm_acc': mlm_global_acc / global_step,
-        'val_scst_loss': scst_global_loss / global_step,
-        'val_scst_acc': scst_global_score / global_step
     }
 
 
@@ -908,8 +843,11 @@ def main():
                         help="Run evaluation during training at each save_steps.")
     parser.add_argument("--no_cuda", action='store_true', help="Avoid using CUDA.")
     parser.add_argument('--seed', type=int, default=88, help="random seed for initialization.")
-    parser.add_argument('--scst', action='store_true', help='Self-critical sequence training')
     parser.add_argument('--find_lr', action='store_true', help='Find optimal learning rate')
+    parser.add_argument('--fp16', action='store_true', default=True, help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
+    parser.add_argument('--fp16_opt_level', type=str, default='O1',
+                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
+                             "See details at https://nvidia.github.io/apex/amp.html")
 
     # for tensorboard
     parser.add_argument('--global_step_offset', type=int, default=0, help="global step offset for logging to directory")
@@ -958,9 +896,6 @@ def main():
         config = config_class.from_pretrained(args.config_name if args.config_name else \
                                                   args.model_name_or_path, num_labels=args.num_labels,
                                               finetuning_task='image_captioning')
-        if args.scst:
-            # avoid using too much memory
-            config.output_hidden_states = True
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name \
                                                         else args.model_name_or_path, do_lower_case=args.do_lower_case)
         config.img_feature_dim = args.img_feature_dim
@@ -994,17 +929,16 @@ def main():
 
         if not args.do_eval:
             # generate captions only
-            predict_file = get_predict_file(args.personality_data_dir, checkpoint, test_dataset.personality_dataset.yaml_file, args)
+            predict_file = get_predict_file(args.personality_data_dir, checkpoint,
+                                            test_dataset.personality_dataset.yaml_file, args)
             test(args, test_dataset.personality_dataset, model, tokenizer, predict_file)
 
             predict_file = get_predict_file(args.coco_data_dir, checkpoint, test_dataset.coco_datasetyaml_file, args)
             test(args, test_dataset.coco_dataset, model, tokenizer, predict_file)
-            logger.info("Prediction results saved to: {}".format(predict_file))
         else:
             # add evaluation
-            evaluate_file = evaluate(args, args.personality_data_dir, test_dataset.personality_dataset, model, tokenizer, checkpoint)
-            evaluate_file = evaluate(args, args.coco_data_dir, test_dataset.coco_dataset, model, tokenizer, checkpoint)
-            logger.info("Evaluation results saved to: {}".format(evaluate_file))
+            evaluate(args, args.personality_data_dir, test_dataset.personality_dataset, model, tokenizer, checkpoint)
+            evaluate(args, args.coco_data_dir, test_dataset.coco_dataset, model, tokenizer, checkpoint)
 
 
 if __name__ == "__main__":
