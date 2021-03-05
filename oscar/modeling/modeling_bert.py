@@ -1,13 +1,15 @@
 # Copyright (c) 2020 Microsoft Corporation. Licensed under the MIT license.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
+
 import logging
 import math
+
 import torch
-from torch import nn
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
+from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
+
 from transformers.pytorch_transformers.modeling_bert import (BertEmbeddings,
                                                              BertSelfAttention, BertAttention, BertEncoder, BertLayer,
                                                              BertSelfOutput, BertIntermediate, BertOutput,
@@ -466,7 +468,6 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
         self.loss = nn.CrossEntropyLoss(reduction='mean')
         self.drop_worst_ratio = 0.2
 
-    @autocast()
     def forward(self, *args, **kwargs):
         is_decode = kwargs.get('is_decode', False)
         if is_decode:
@@ -474,7 +475,6 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
         else:
             return self.encode_forward(*args, **kwargs)
 
-    @autocast()
     def encode_forward(self, input_ids, img_feats, attention_mask, masked_pos, masked_ids=None,
                        token_type_ids=None, position_ids=None, head_mask=None,
                        is_training=True, encoder_history_states=None):

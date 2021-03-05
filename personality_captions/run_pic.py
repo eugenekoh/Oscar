@@ -465,6 +465,12 @@ def train(args, train_dataset, model, tokenizer):
     ]
     optimizer = AdamW(grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
 
+    try:
+        from apex import amp
+    except ImportError:
+        raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
@@ -499,10 +505,12 @@ def train(args, train_dataset, model, tokenizer):
                       'masked_pos': batch[4], 'masked_ids': batch[5]
                       }
 
-            with autocast():
-                outputs = model(**inputs)
-                loss, logits = outputs[:2]
+            outputs = model(**inputs)
+            loss, logits = outputs[:2]
 
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             masked_ids = inputs['masked_ids']
             masked_ids = masked_ids[masked_ids != 0]
             batch_score = compute_score_with_logits(logits, masked_ids)
