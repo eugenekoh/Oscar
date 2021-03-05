@@ -27,7 +27,7 @@ from oscar.utils.misc import (mkdir, set_seed,
                               load_from_yaml_file, find_file_path_in_yaml)
 from oscar.utils.tsv_file import TSVFile
 from oscar.utils.tsv_file_ops import tsv_writer
-from transformers.pytorch_transformers import BertTokenizer, BertConfig
+from transformers.pytorch_transformers import BertTokenizer, BertConfig, AdamW
 from transformers.pytorch_transformers import WarmupLinearSchedule, WarmupConstantSchedule
 
 
@@ -456,11 +456,14 @@ def train(args, train_dataset, model, tokenizer):
                   * args.num_train_epochs
 
     # Prepare optimizer and scheduler
-    optimizer = optim.Adahessian(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.adam_epsilon,
-    )
+    no_decay = ['bias', 'LayerNorm.weight']
+    grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not \
+            any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
+        {'params': [p for n, p in model.named_parameters() if \
+                    any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+    optimizer = AdamW(grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
 
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
@@ -510,7 +513,7 @@ def train(args, train_dataset, model, tokenizer):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
-            scaler.scale(loss).backward(create_graph=True)
+            scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             global_loss += loss.item()
             global_acc += batch_acc
