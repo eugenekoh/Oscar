@@ -455,11 +455,14 @@ def train(args, train_dataset, model, tokenizer):
                   * args.num_train_epochs
 
     # Prepare optimizer and scheduler
-    optimizer = optim.Adahessian(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.adam_epsilon,
-    )
+    no_decay = ['bias', 'LayerNorm.weight']
+    grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not \
+            any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
+        {'params': [p for n, p in model.named_parameters() if \
+                    any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+    optimizer = AdamW(grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
 
     try:
         from apex import amp
@@ -520,7 +523,7 @@ def train(args, train_dataset, model, tokenizer):
                 loss = loss / args.gradient_accumulation_steps
 
             with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward(create_graph=True)
+                scaled_loss.backward()
             torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
 
             global_loss += loss.item()
