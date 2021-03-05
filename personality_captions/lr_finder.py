@@ -387,7 +387,7 @@ class LRFinder(object):
                 with amp.scale_loss(
                     loss, self.optimizer, delay_unscale=delay_unscale
                 ) as scaled_loss:
-                    scaled_loss.backward()
+                    scaled_loss.backward(create_graph=True)
             else:
                 loss.backward(create_graph=True)
 
