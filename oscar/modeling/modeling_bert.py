@@ -156,9 +156,9 @@ class BertImgModel(BertPreTrainedModel):
     """ Expand from BertModel to handle image region features as input
     """
 
-    def __init__(self, config):
+    def __init__(self, config, embedding_class):
         super(BertImgModel, self).__init__(config)
-        self.embeddings = PersonalityBertEmbeddings(config)
+        self.embeddings = embedding_class(config)
         self.encoder = CaptionBertEncoder(config)
         self.pooler = BertPooler(config)
 
@@ -460,7 +460,7 @@ class BertForPersonalityImageCaptioning(CaptionPreTrainedModel):
     def __init__(self, config):
         super(BertForPersonalityImageCaptioning, self).__init__(config)
         self.config = config
-        self.bert = BertImgModel(config)
+        self.bert = BertImgModel(config, PersonalityBertEmbeddings)
         self.transform = BertPredictionHeadTransform(config)
         bert_embedding_weight = self.bert.embeddings.word_embeddings.weight
         self.decoder = nn.Linear(bert_embedding_weight.size(1),
@@ -755,7 +755,7 @@ class BertForImageCaptioning(CaptionPreTrainedModel):
     def __init__(self, config):
         super(BertForImageCaptioning, self).__init__(config)
         self.config = config
-        self.bert = BertImgModel(config)
+        self.bert = BertImgModel(config, BertEmbeddings)
         self.transform = BertPredictionHeadTransform(config)
         bert_embedding_weight = self.bert.embeddings.word_embeddings.weight
         self.decoder = nn.Linear(bert_embedding_weight.size(1),
